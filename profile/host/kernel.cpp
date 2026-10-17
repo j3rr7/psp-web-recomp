@@ -251,6 +251,10 @@ void Kernel::install(const std::vector<psprecomp::PspImport> &imports) {
     hle(tm, 0x369ED59Du, "sceKernelGetSystemTimeLow", &Kernel::sceKernelGetSystemTimeLow);
     hle(tm, 0x82BC5777u, "sceKernelGetSystemTimeWide", &Kernel::sceKernelGetSystemTimeWide);
     hle(tm, 0xDB738F35u, "sceKernelGetSystemTime", &Kernel::sceKernelGetSystemTime);
+    hle(tm, 0x110DEC9Au, "sceKernelUSec2SysClock", &Kernel::sceKernelUSec2SysClock);
+    hle(tm, 0xC8CD158Cu, "sceKernelUSec2SysClockWide", &Kernel::sceKernelUSec2SysClockWide);
+    hle(tm, 0xBA6B92E2u, "sceKernelSysClock2USec", &Kernel::sceKernelSysClock2USec);
+    hle(tm, 0xE1619D7Cu, "sceKernelSysClock2USecWide", &Kernel::sceKernelSysClock2USecWide);
     hle(tm, 0xD6DA4BA1u, "sceKernelCreateSema", &Kernel::sceKernelCreateSema);
     hle(tm, 0xB7D098C6u, "sceKernelCreateMutex", &Kernel::sceKernelCreateMutex);
     hle(tm, 0xF8170FBEu, "sceKernelDeleteMutex", &Kernel::sceKernelDeleteMutex);
@@ -954,6 +958,41 @@ void Kernel::sceKernelGetSystemTime(Ctx &ctx) {
         rt_.memory().store32(ctx.gpr[4], static_cast<std::uint32_t>(now));
         rt_.memory().store32(ctx.gpr[4] + 4u, static_cast<std::uint32_t>(now >> 32u));
     }
+    finish(ctx, 0u);
+}
+
+void Kernel::sysclock_to_usec(std::uint64_t clock, std::uint32_t low_addr, std::uint32_t high_addr) {
+    if (low_addr == 0u) {
+        if (high_addr != 0u) rt_.memory().store32(high_addr, static_cast<std::uint32_t>(clock));
+    } else {
+        rt_.memory().store32(low_addr, static_cast<std::uint32_t>(clock / 1000000ull));
+        if (high_addr != 0u) rt_.memory().store32(high_addr, static_cast<std::uint32_t>(clock % 1000000ull));
+    }
+}
+
+void Kernel::sceKernelUSec2SysClock(Ctx &ctx) {
+    if (ctx.gpr[5] != 0u) {
+        rt_.memory().store32(ctx.gpr[5], ctx.gpr[4]);
+        rt_.memory().store32(ctx.gpr[5] + 4u, 0u);
+    }
+    finish(ctx, 0u);
+}
+
+void Kernel::sceKernelUSec2SysClockWide(Ctx &ctx) {
+    finish64(ctx, ctx.gpr[4]);
+}
+
+void Kernel::sceKernelSysClock2USec(Ctx &ctx) {
+    const std::uint64_t clock = ctx.gpr[4] != 0u
+        ? (rt_.memory().load32(ctx.gpr[4]) | (static_cast<std::uint64_t>(rt_.memory().load32(ctx.gpr[4] + 4u)) << 32u))
+        : 0ull;
+    sysclock_to_usec(clock, ctx.gpr[5], ctx.gpr[6]);
+    finish(ctx, 0u);
+}
+
+void Kernel::sceKernelSysClock2USecWide(Ctx &ctx) {
+    const std::uint64_t clock = ctx.gpr[4] | (static_cast<std::uint64_t>(ctx.gpr[5]) << 32u);
+    sysclock_to_usec(clock, ctx.gpr[6], ctx.gpr[7]);
     finish(ctx, 0u);
 }
 

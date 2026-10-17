@@ -75,6 +75,9 @@ void Kernel::install_devices() {
     hle("sceUmdUser", 0x8EF08FCEu, "sceUmdWaitDriveStat", &Kernel::return_zero);
     hle("sceUmdUser", 0x4A9E5E29u, "sceUmdWaitDriveStatCB", &Kernel::return_zero);
     hle("sceUmdUser", 0x6AF9B50Au, "sceUmdCancelWaitDriveStat", &Kernel::return_zero);
+    hle("sceUmdUser", 0xAEE7404Du, "sceUmdRegisterUMDCallBack", &Kernel::return_zero);
+    hle("sceUmdUser", 0xBD2BDE07u, "sceUmdUnRegisterUMDCallBack", &Kernel::return_zero);
+    hle("sceUmdUser", 0x20628E6Fu, "sceUmdGetErrorStat", &Kernel::return_zero);
     hle("sceImpose", 0x24FD7BCFu, "sceImposeGetLanguageMode", &Kernel::sceImposeGetLanguageMode);
     hle("sceImpose", 0x36AA6E91u, "sceImposeSetLanguageMode", &Kernel::return_zero);
     hle("sceDisplay", 0xDBA6C4C4u, "sceDisplayGetFramePerSec", &Kernel::sceDisplayGetFramePerSec);
@@ -122,6 +125,8 @@ void Kernel::install_devices() {
     // Firmware modules are all high-level emulated, so loading one is a no-op.
     hle("sceUtility", 0x2A2B3DE0u, "sceUtilityLoadModule", &Kernel::return_zero);
     hle("sceUtility", 0xE49BFE92u, "sceUtilityUnloadModule", &Kernel::return_zero);
+    hle("sceUtility", 0xC629AF26u, "sceUtilityLoadAvModule", &Kernel::return_zero);
+    hle("sceUtility", 0xF7D8D092u, "sceUtilityUnloadAvModule", &Kernel::return_zero);
     // Keys for downloadable content; disc files use sceIoIoctl instead.
     hle("scePspNpDrm_user", 0xA1336091u, "sceNpDrmSetLicenseeKey", &Kernel::return_zero);
     hle("scePspNpDrm_user", 0x08D98894u, "sceNpDrmEdataSetupKey", &Kernel::return_zero);

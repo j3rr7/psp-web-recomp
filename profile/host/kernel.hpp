@@ -103,6 +103,9 @@ struct OpenFile {
     // Set once a PGD (DRM) file has been decrypted; reads come from here then.
     std::shared_ptr<const std::vector<std::uint8_t>> plain;
     std::uint32_t pgd_offset{}; // where the PGD container starts in the file
+    bool virtual_disc{};        // whole-disc LBN handle (disc0:/sce_lbn0x0_size...)
+    std::uint64_t virtual_size{};
+    std::string cached_relative;
 };
 
 struct DirectoryEntry {
@@ -311,6 +314,8 @@ private:
     // sectors, so each file gets a stable one of its own the first time it is seen.
     std::uint32_t disc_lbn(const std::string &relative, std::uint64_t size);
     [[nodiscard]] std::string resolve_lbn_path(const std::string &psp_path) const;
+    [[nodiscard]] bool parse_virtual_disc(const std::string &psp_path, std::uint64_t &size) const;
+    void virtual_disc_read(Ctx &ctx, std::int32_t fd, std::uint32_t buffer, std::uint32_t length, bool async);
     std::map<std::string, std::uint32_t> lbn_by_path_;
     std::map<std::uint32_t, std::pair<std::string, std::uint64_t>> path_by_lbn_;
     std::uint32_t next_lbn_{0x1000u};
@@ -342,6 +347,11 @@ private:
     void sceKernelGetSystemTimeLow(Ctx &ctx);
     void sceKernelGetSystemTimeWide(Ctx &ctx);
     void sceKernelGetSystemTime(Ctx &ctx);
+    void sysclock_to_usec(std::uint64_t clock, std::uint32_t low_addr, std::uint32_t high_addr);
+    void sceKernelUSec2SysClock(Ctx &ctx);
+    void sceKernelUSec2SysClockWide(Ctx &ctx);
+    void sceKernelSysClock2USec(Ctx &ctx);
+    void sceKernelSysClock2USecWide(Ctx &ctx);
     void sceKernelCreateSema(Ctx &ctx);
     void sceKernelCreateMutex(Ctx &ctx);
     void sceKernelDeleteMutex(Ctx &ctx);

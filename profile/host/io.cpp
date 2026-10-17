@@ -108,6 +108,24 @@ std::uint32_t Kernel::disc_lbn(const std::string &relative, std::uint64_t size) 
     return lbn;
 }
 
+bool Kernel::parse_virtual_disc(const std::string &psp_path, std::uint64_t &size) const {
+    std::string relative;
+    if (!disc_relative(psp_path, relative)) return false;
+    const std::string key = lbn_key(relative);
+    if (key.rfind("/sce_lbn", 0) != 0u) return false;
+    char *end = nullptr;
+    const auto lbn = static_cast<std::uint32_t>(std::strtoul(key.c_str() + 8, &end, 16));
+    if (lbn != 0u || path_by_lbn_.contains(0u)) return false;
+    size = (end != nullptr && std::strncmp(end, "_size", 5) == 0)
+        ? static_cast<std::uint64_t>(std::strtoull(end + 5, nullptr, 16))
+        : 0ull;
+    if (size == 0ull && !path_by_lbn_.empty()) {
+        const auto &[last_lbn, last_entry] = *path_by_lbn_.rbegin();
+        size = static_cast<std::uint64_t>(last_lbn) * 2048ull + last_entry.second;
+    }
+    return size != 0ull;
+}
+
 std::string Kernel::resolve_lbn_path(const std::string &psp_path) const {
     std::string relative;
     if (!disc_relative(psp_path, relative)) return psp_path;
@@ -117,6 +135,7 @@ std::string Kernel::resolve_lbn_path(const std::string &psp_path) const {
     const auto lbn = static_cast<std::uint32_t>(std::strtoul(key.c_str() + 8, &end, 16));
     const auto it = path_by_lbn_.find(lbn);
     if (it == path_by_lbn_.end()) {
+        if (std::uint64_t virtual_size = 0u; parse_virtual_disc(psp_path, virtual_size)) return psp_path;
         std::cerr << "[io] no disc file starts at sector " << lbn << " (" << psp_path << ")\n";
         return psp_path;
     }
@@ -161,6 +180,19 @@ void Kernel::sceIoOpen(Ctx &ctx) {
     if (skip_movies && psp_path.size() > 4u && lbn_key(psp_path.substr(psp_path.size() - 4u)) == "/.pmf") psp_path += ".skipped";
     static const bool trace = std::getenv("PSPWEB_TRACE_IO") != nullptr;
     if (trace) std::cerr << "[io] open " << read_string(ctx.gpr[4]) << " -> " << psp_path << "\n";
+    if (std::uint64_t virtual_size = 0u; parse_virtual_disc(psp_path, virtual_size)) {
+        const std::int32_t fd = allocate_fd();
+        if (fd < 0) {
+            finish(ctx, kErrorTooManyFiles);
+            return;
+        }
+        OpenFile open{nullptr, nullptr, 0u, psp_path};
+        open.virtual_disc = true;
+        open.virtual_size = virtual_size;
+        files_[fd] = std::move(open);
+        finish(ctx, static_cast<std::uint32_t>(fd));
+        return;
+    }
     std::string relative;
     if (webfs_ && disc_relative(psp_path, relative)) {
         const WebFile *file = webfs_->find(relative);
@@ -251,6 +283,108 @@ void Kernel::web_read(Ctx &ctx, std::int32_t fd, std::uint32_t buffer, std::uint
     block(ctx, WaitType::Io, 0u);
 }
 
+void Kernel::virtual_disc_read(Ctx &ctx, std::int32_t fd, std::uint32_t buffer, std::uint32_t length, bool async) {
+    OpenFile &open = files_.at(fd);
+    const std::uint64_t position = open.position;
+    const std::uint32_t count = static_cast<std::uint32_t>(
+        std::min<std::uint64_t>(length, open.virtual_size > position ? open.virtual_size - position : 0u));
+    std::uint8_t *dst = rt_.memory().raw_pointer(buffer, count);
+    if (count != 0u && dst == nullptr) {
+        if (async) {
+            open.async_result = static_cast<std::int64_t>(static_cast<std::int32_t>(kErrorBadFile));
+            open.async_pending = false;
+            finish(ctx, 0u);
+        } else {
+            finish(ctx, kErrorBadFile);
+        }
+        return;
+    }
+    if (count != 0u) std::memset(dst, 0, count);
+    const auto target_lbn = static_cast<std::uint32_t>(position / 2048u);
+    auto lbn_it = path_by_lbn_.upper_bound(target_lbn);
+    if (lbn_it != path_by_lbn_.begin()) --lbn_it;
+    if (count != 0u && lbn_it != path_by_lbn_.end()) {
+        const std::uint64_t file_start = static_cast<std::uint64_t>(lbn_it->first) * 2048ull;
+        if (position >= file_start) {
+            const std::string &relative = lbn_it->second.first;
+            const std::uint64_t file_size = lbn_it->second.second;
+            const std::uint64_t file_offset = position - file_start;
+            const std::uint32_t file_count = file_offset < file_size
+                ? static_cast<std::uint32_t>(std::min<std::uint64_t>(count, file_size - file_offset))
+                : 0u;
+            if (file_count > 0u) {
+                if (webfs_) {
+                    const WebFile *web_file = webfs_->find(relative);
+                    if (web_file != nullptr && !web_file->directory) {
+                        if (webfs_->read_cached(*web_file, file_offset, file_count, dst)) {
+                            open.position += count;
+                            if (async) {
+                                open.async_result = count;
+                                open.async_pending = false;
+                                finish(ctx, 0u);
+                            } else {
+                                finish(ctx, count);
+                            }
+                            return;
+                        }
+                        const std::int32_t waiting_thread = current_uid_;
+                        if (async) open.async_pending = true;
+                        webfs_->fetch(*web_file, file_offset, file_count,
+                                      [this, fd, buffer, count, file_count, position, file_offset, web_file, async, waiting_thread](bool ok) {
+                            const auto it = files_.find(fd);
+                            if (it == files_.end()) return;
+                            std::uint8_t *out = rt_.memory().raw_pointer(buffer, count);
+                            if (out != nullptr && count != 0u) std::memset(out, 0, count);
+                            const bool copied = ok && out != nullptr && webfs_->read_cached(*web_file, file_offset, file_count, out);
+                            const std::int64_t result = copied
+                                ? static_cast<std::int64_t>(count)
+                                : static_cast<std::int64_t>(static_cast<std::int32_t>(kErrorIo));
+                            if (copied) it->second.position = position + count;
+                            if (async) {
+                                it->second.async_result = result;
+                                it->second.async_pending = false;
+                                finish_async(fd);
+                            } else if (Thread *t = thread(waiting_thread); t != nullptr && t->uid == waiting_thread &&
+                                       t->state == ThreadState::Waiting && t->wait == WaitType::Io) {
+                                wake(*t, static_cast<std::uint32_t>(result));
+                            }
+                        });
+                        if (async) {
+                            finish(ctx, 0u);
+                            return;
+                        }
+                        if (Thread *self = current(); self != nullptr) {
+                            self->wait_uid = fd;
+                            self->wait_mode = 0u;
+                        }
+                        block(ctx, WaitType::Io, 0u);
+                        return;
+                    }
+                } else {
+                    if (open.file == nullptr || open.cached_relative != relative) {
+                        if (open.file != nullptr) std::fclose(open.file);
+                        const std::string disc_path = "disc0:" + (relative.starts_with('/') ? relative : "/" + relative);
+                        open.file = std::fopen(host_path(disc_path).string().c_str(), "rb");
+                        open.cached_relative = relative;
+                    }
+                    if (open.file != nullptr) {
+                        std::fseek(open.file, static_cast<long>(file_offset), SEEK_SET);
+                        (void)std::fread(dst, 1u, file_count, open.file);
+                    }
+                }
+            }
+        }
+    }
+    open.position += count;
+    if (async) {
+        open.async_result = count;
+        open.async_pending = false;
+        finish(ctx, 0u);
+    } else {
+        finish(ctx, count);
+    }
+}
+
 // Wakes threads blocked in sceIoWaitAsync on `fd` and hands them the result.
 void Kernel::finish_async(std::int32_t fd) {
     const auto it = files_.find(fd);
@@ -278,6 +412,10 @@ void Kernel::sceIoRead(Ctx &ctx) {
     }
     if (it->second.plain) {
         finish(ctx, plain_read(it->second, ctx.gpr[5], ctx.gpr[6]));
+        return;
+    }
+    if (it->second.virtual_disc) {
+        virtual_disc_read(ctx, fd, ctx.gpr[5], ctx.gpr[6], false);
         return;
     }
     if (it->second.web != nullptr) {
@@ -317,8 +455,9 @@ void Kernel::sceIoWrite(Ctx &ctx) {
 void Kernel::sceIoLseek(Ctx &ctx) {
     const auto it = files_.find(static_cast<std::int32_t>(ctx.gpr[4]));
     const std::int64_t offset = static_cast<std::int64_t>(ctx.gpr[6] | (static_cast<std::uint64_t>(ctx.gpr[7]) << 32u));
-    if (it != files_.end() && (it->second.plain || it->second.web != nullptr)) {
-        const std::uint64_t size = it->second.plain ? it->second.plain->size() : it->second.web->size;
+    if (it != files_.end() && (it->second.plain || it->second.virtual_disc || it->second.web != nullptr)) {
+        const std::uint64_t size = it->second.plain ? it->second.plain->size()
+            : (it->second.virtual_disc ? it->second.virtual_size : it->second.web->size);
         it->second.position = seek_target(it->second.position, size, offset, ctx.gpr[8]);
         finish64(ctx, it->second.position);
         return;
@@ -334,8 +473,9 @@ void Kernel::sceIoLseek(Ctx &ctx) {
 void Kernel::sceIoLseek32(Ctx &ctx) {
     const auto it = files_.find(static_cast<std::int32_t>(ctx.gpr[4]));
     const std::int64_t offset = static_cast<std::int32_t>(ctx.gpr[5]);
-    if (it != files_.end() && (it->second.plain || it->second.web != nullptr)) {
-        const std::uint64_t size = it->second.plain ? it->second.plain->size() : it->second.web->size;
+    if (it != files_.end() && (it->second.plain || it->second.virtual_disc || it->second.web != nullptr)) {
+        const std::uint64_t size = it->second.plain ? it->second.plain->size()
+            : (it->second.virtual_disc ? it->second.virtual_size : it->second.web->size);
         it->second.position = seek_target(it->second.position, size, offset, ctx.gpr[6]);
         finish(ctx, static_cast<std::uint32_t>(it->second.position));
         return;
@@ -443,13 +583,17 @@ void Kernel::sceIoOpenAsync(Ctx &ctx) {
     }
     std::string relative;
     OpenFile open{nullptr, nullptr, 0u, psp_path};
-    if (webfs_ && disc_relative(psp_path, relative)) {
+    std::uint64_t virtual_size = 0u;
+    if (parse_virtual_disc(psp_path, virtual_size)) {
+        open.virtual_disc = true;
+        open.virtual_size = virtual_size;
+    } else if (webfs_ && disc_relative(psp_path, relative)) {
         const WebFile *file = webfs_->find(relative);
         open.web = file != nullptr && !file->directory ? file : nullptr;
     } else {
         open.file = std::fopen(host_path(psp_path).string().c_str(), fopen_mode(ctx.gpr[5]));
     }
-    const bool ok = open.web != nullptr || open.file != nullptr;
+    const bool ok = open.virtual_disc || open.web != nullptr || open.file != nullptr;
     if (!ok) std::cerr << "[io] async open failed: " << psp_path << "\n";
     if (std::getenv("PSPWEB_TRACE_IO") != nullptr) std::cerr << "[io] open async " << psp_path << " -> " << fd << "\n";
     open.async_result = ok ? fd : static_cast<std::int32_t>(kErrorFileNotFound);
@@ -468,6 +612,10 @@ void Kernel::sceIoReadAsync(Ctx &ctx) {
         it->second.async_result = static_cast<std::int32_t>(plain_read(it->second, ctx.gpr[5], ctx.gpr[6]));
         it->second.async_pending = false;
         finish(ctx, 0u);
+        return;
+    }
+    if (it->second.virtual_disc) {
+        virtual_disc_read(ctx, fd, ctx.gpr[5], ctx.gpr[6], true);
         return;
     }
     if (it->second.web != nullptr) {
@@ -491,8 +639,9 @@ void Kernel::sceIoLseekAsync(Ctx &ctx) {
         return;
     }
     const std::int64_t offset = static_cast<std::int64_t>(ctx.gpr[6] | (static_cast<std::uint64_t>(ctx.gpr[7]) << 32u));
-    if (it->second.plain || it->second.web != nullptr) {
-        const std::uint64_t size = it->second.plain ? it->second.plain->size() : it->second.web->size;
+    if (it->second.plain || it->second.virtual_disc || it->second.web != nullptr) {
+        const std::uint64_t size = it->second.plain ? it->second.plain->size()
+            : (it->second.virtual_disc ? it->second.virtual_size : it->second.web->size);
         it->second.position = seek_target(it->second.position, size, offset, ctx.gpr[8]);
         it->second.async_result = static_cast<std::int64_t>(it->second.position);
     } else if (it->second.file != nullptr) {
