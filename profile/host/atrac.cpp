@@ -28,6 +28,7 @@ namespace {
 constexpr std::uint32_t kErrorNoId = 0x80630003u;
 constexpr std::uint32_t kErrorBadId = 0x80630005u;
 constexpr std::uint32_t kErrorUnknownFormat = 0x80630006u;
+constexpr std::uint32_t kErrorIncorrectReadSize = 0x80630013u;
 constexpr std::uint32_t kErrorBadSample = 0x80630015u;
 constexpr std::uint32_t kErrorNoLoopInformation = 0x80630021u;
 constexpr std::uint32_t kErrorSecondBufferNotNeeded = 0x80630022u;
@@ -160,7 +161,7 @@ struct Atrac {
         if (loop_num != 0 && track.loop_end >= 0 && sample <= track.loop_end) count = std::min(count, track.loop_end + 1 - sample);
         return count;
     }
-    [[nodiscard]] bool all_on_memory() const { return buffer_size >= track.file_size; }
+    [[nodiscard]] bool all_on_memory() const { return buffer_size >= track.file_size && file.size() >= track.file_size; }
     [[nodiscard]] std::int32_t remain_frames() const {
         if (all_on_memory()) return -1;
         if (file.size() >= track.file_size) return track.loop_start >= 0 && loop_num != 0 ? -3 : -2;
@@ -231,16 +232,18 @@ void Kernel::install_atrac() {
         if (address != 0u) m.store32(address, value);
     };
 
-    auto set_data = [&m](Atrac &a, std::uint32_t buffer, std::uint32_t size) -> std::uint32_t {
-        const std::uint8_t *header = m.raw_pointer(buffer, std::min<std::uint32_t>(size, 4096u));
+    auto set_data = [&m](Atrac &a, std::uint32_t buffer, std::uint32_t read_size, std::uint32_t buffer_size) -> std::uint32_t {
+        if (read_size > buffer_size) return kErrorIncorrectReadSize;
+        const std::uint32_t header_window = std::min<std::uint32_t>(read_size, 4096u);
+        const std::uint8_t *header = m.raw_pointer(buffer, header_window);
         Track track;
-        if (header == nullptr || !parse_header(header, std::min<std::uint32_t>(size, 4096u), track)) return kErrorUnknownFormat;
+        if (header == nullptr || !parse_header(header, header_window, track)) return kErrorUnknownFormat;
         a.release();
         a.used = true;
         a.track = track;
         a.buffer = buffer;
-        a.buffer_size = size;
-        const std::uint32_t loaded = std::min(size, track.file_size);
+        a.buffer_size = buffer_size;
+        const std::uint32_t loaded = std::min({read_size, buffer_size, track.file_size});
         const std::uint8_t *data = m.raw_pointer(buffer, loaded);
         if (data != nullptr) a.file.assign(data, data + loaded);
         int align = static_cast<int>(track.block_align);
@@ -259,13 +262,35 @@ void Kernel::install_atrac() {
     add(0x7A20E7AFu, "sceAtracSetDataAndGetID", [&st, set_data](Ctx &ctx) -> std::uint32_t {
         auto slot = std::find_if(st.ids.begin(), st.ids.end(), [](const Atrac &a) { return !a.used; });
         if (slot == st.ids.end()) return kErrorNoId;
-        const std::uint32_t result = set_data(*slot, ctx.gpr[4], ctx.gpr[5]);
+        const std::uint32_t result = set_data(*slot, ctx.gpr[4], ctx.gpr[5], ctx.gpr[5]);
         return result != 0u ? result : static_cast<std::uint32_t>(slot - st.ids.begin());
     });
     add(0x0E2A73ABu, "sceAtracSetData", [get, set_data](Ctx &ctx) {
         Atrac *a = get(ctx.gpr[4]);
         if (a == nullptr) return kErrorBadId;
-        return set_data(*a, ctx.gpr[5], ctx.gpr[6]);
+        return set_data(*a, ctx.gpr[5], ctx.gpr[6], ctx.gpr[6]);
+    });
+    add(0x0FAE370Eu, "sceAtracSetHalfwayBufferAndGetID", [&st, set_data](Ctx &ctx) -> std::uint32_t {
+        auto slot = std::find_if(st.ids.begin(), st.ids.end(), [](const Atrac &a) { return !a.used; });
+        if (slot == st.ids.end()) return kErrorNoId;
+        const std::uint32_t result = set_data(*slot, ctx.gpr[4], ctx.gpr[5], ctx.gpr[6]);
+        return result != 0u ? result : static_cast<std::uint32_t>(slot - st.ids.begin());
+    });
+    add(0x3F6E26B5u, "sceAtracSetHalfwayBuffer", [get, set_data](Ctx &ctx) {
+        Atrac *a = get(ctx.gpr[4]);
+        if (a == nullptr) return kErrorBadId;
+        return set_data(*a, ctx.gpr[5], ctx.gpr[6], ctx.gpr[7]);
+    });
+    add(0x5DD66588u, "sceAtracSetMOutHalfwayBufferAndGetID", [&st, set_data](Ctx &ctx) -> std::uint32_t {
+        auto slot = std::find_if(st.ids.begin(), st.ids.end(), [](const Atrac &a) { return !a.used; });
+        if (slot == st.ids.end()) return kErrorNoId;
+        const std::uint32_t result = set_data(*slot, ctx.gpr[4], ctx.gpr[5], ctx.gpr[6]);
+        return result != 0u ? result : static_cast<std::uint32_t>(slot - st.ids.begin());
+    });
+    add(0x9CD7DE03u, "sceAtracSetMOutHalfwayBuffer", [get, set_data](Ctx &ctx) {
+        Atrac *a = get(ctx.gpr[4]);
+        if (a == nullptr) return kErrorBadId;
+        return set_data(*a, ctx.gpr[5], ctx.gpr[6], ctx.gpr[7]);
     });
     add(0x132F1ECAu, "sceAtracReinit", [](Ctx &) { return 0u; });
     add(0x780F88D1u, "sceAtracGetAtracID", [&st](Ctx &) -> std::uint32_t {
