@@ -369,7 +369,18 @@ void Kernel::virtual_disc_read(Ctx &ctx, std::int32_t fd, std::uint32_t buffer, 
                     }
                     if (open.file != nullptr) {
                         std::fseek(open.file, static_cast<long>(file_offset), SEEK_SET);
-                        (void)std::fread(dst, 1u, file_count, open.file);
+                        if (std::fread(dst, 1u, file_count, open.file) != file_count) {
+                            // The host file is shorter than the disc map says it is.
+                            std::cerr << "[io] short read on " << relative << "\n";
+                            if (async) {
+                                open.async_result = static_cast<std::int64_t>(static_cast<std::int32_t>(kErrorIo));
+                                open.async_pending = false;
+                                finish(ctx, 0u);
+                            } else {
+                                finish(ctx, kErrorIo);
+                            }
+                            return;
+                        }
                     }
                 }
             }
@@ -383,6 +394,22 @@ void Kernel::virtual_disc_read(Ctx &ctx, std::int32_t fd, std::uint32_t buffer, 
     } else {
         finish(ctx, count);
     }
+}
+
+// sceIoSetAsyncCallback(fd, cbid, arg): remember the callback to fire when this
+// fd's async operation completes.  Games that drive disc I/O from a callback
+// (rather than polling) leave an object half-constructed if it never runs, so
+// finish_async() must dispatch it as well as waking any waiter.
+void Kernel::sceIoSetAsyncCallback(Ctx &ctx) {
+    const std::int32_t fd = static_cast<std::int32_t>(ctx.gpr[4]);
+    const auto it = files_.find(fd);
+    if (it == files_.end()) {
+        finish(ctx, kErrorBadFile);
+        return;
+    }
+    it->second.async_cb = static_cast<std::int32_t>(ctx.gpr[5]);
+    it->second.async_cb_arg = ctx.gpr[6];
+    finish(ctx, 0u);
 }
 
 // Wakes threads blocked in sceIoWaitAsync on `fd` and hands them the result.
@@ -399,6 +426,13 @@ void Kernel::finish_async(std::int32_t fd) {
             rt_.memory().store32(t.wait_out_address + 4u, static_cast<std::uint32_t>(value >> 32u));
         }
         wake(t, 0u);
+    }
+    // A callback registered with sceIoSetAsyncCallback runs when the operation
+    // lands.  The firmware passes the fd in a0, the result low word in a1 and
+    // the caller's argument in a2.
+    if (it->second.async_cb != 0) {
+        const auto cb = callbacks_.find(it->second.async_cb);
+        if (cb != callbacks_.end()) cb->second.pending = true;
     }
     if (it->second.closing) files_.erase(it);
 }
@@ -648,6 +682,26 @@ void Kernel::sceIoLseekAsync(Ctx &ctx) {
         std::fseek(it->second.file, static_cast<long>(offset), static_cast<int>(ctx.gpr[8]));
         it->second.async_result = std::ftell(it->second.file);
     }
+    finish(ctx, 0u);
+}
+
+void Kernel::sceIoLseek32Async(Ctx &ctx) {
+    const auto it = files_.find(static_cast<std::int32_t>(ctx.gpr[4]));
+    if (it == files_.end()) {
+        finish(ctx, kErrorBadFile);
+        return;
+    }
+    const std::int64_t offset = static_cast<std::int32_t>(ctx.gpr[5]);
+    if (it->second.plain || it->second.virtual_disc || it->second.web != nullptr) {
+        const std::uint64_t size = it->second.plain ? it->second.plain->size()
+            : (it->second.virtual_disc ? it->second.virtual_size : it->second.web->size);
+        it->second.position = seek_target(it->second.position, size, offset, ctx.gpr[6]);
+        it->second.async_result = static_cast<std::int64_t>(it->second.position);
+    } else if (it->second.file != nullptr) {
+        std::fseek(it->second.file, static_cast<long>(offset), static_cast<int>(ctx.gpr[6]));
+        it->second.async_result = std::ftell(it->second.file);
+    }
+    it->second.async_pending = false;
     finish(ctx, 0u);
 }
 

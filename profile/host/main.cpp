@@ -57,6 +57,9 @@ struct Session {
 
 Session g_session;
 std::filesystem::path g_dynamic_listing;
+// Set from the page (see pspweb_set_paused).  While true the guest stops
+// stepping but the session, its log and its state stay alive for inspection.
+bool g_paused = false;
 
 void capture_dynamic_code(std::uint32_t address, const std::uint32_t *words, std::size_t count) {
     std::ofstream out(g_dynamic_listing, std::ios::app);
@@ -219,6 +222,7 @@ void report_web_profile() {
 
 void web_frame() {
     auto &s = g_session;
+    if (g_paused) return;
     auto &worker = s.kernel->ge_worker();
     // Advance the guest at the PSP's 59.94 Hz regardless of the display rate.
     const double now = emscripten_get_now();
@@ -278,6 +282,22 @@ void web_audio_sink(const std::int16_t *samples, std::uint32_t frames) {
 
 extern "C" EMSCRIPTEN_KEEPALIVE void pspweb_set_pad(std::uint32_t buttons, std::uint32_t lx, std::uint32_t ly) {
     if (g_session.kernel) g_session.kernel->set_pad(buttons, static_cast<std::uint8_t>(lx), static_cast<std::uint8_t>(ly));
+}
+
+// Pause/resume the guest from the page.  Pausing dumps the current thread and
+// wait state to the log (so a hang can be captured and downloaded) and stops
+// stepping without tearing the session down; resuming continues where it left
+// off.  Returns the resulting paused state.
+extern "C" EMSCRIPTEN_KEEPALIVE int pspweb_set_paused(int paused) {
+    g_paused = paused != 0;
+    if (g_paused && g_session.kernel) {
+        std::cout << "[pspweb] paused by user at vcount " << g_session.kernel->display().vcount << "\n";
+        g_session.kernel->dump_diagnosis("paused");
+    } else {
+        std::cout << "[pspweb] resumed\n";
+    }
+    EM_ASM({ if (Module.pspStatus) Module.pspStatus($0 ? "paused" : "running"); }, g_paused ? 1 : 0);
+    return g_paused ? 1 : 0;
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE void pspweb_save_choice(int index) {

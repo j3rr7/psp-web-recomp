@@ -33,13 +33,13 @@ git clone https://github.com/snuri00/psp-web-recomp.git
 cd psp-web-recomp
 scripts/setup.sh                                   # PSPRecomp, the patches and the Emscripten SDK
 
-PSP_DECRYPT=/path/to/decrypter scripts/port.sh mygame "My Game.iso"
+PSP_DECRYPT=/path/to/pspdecrypt scripts/port.sh mygame "My Game.iso"
 scripts/serve.sh mygame                            # http://localhost:8613/
 ```
 
 `port.sh` extracts the disc (an ISO, a ZIP containing one, or an already extracted folder), decrypts `PSP_GAME/SYSDIR/EBOOT.BIN`, translates it to C++, writes the manifest for streaming the rest of the disc and builds the page. It takes a few minutes; God of War goes from ZIP to playable page in about four on an 8-core laptop. Add `--native` to also build a headless runner that can dump frames to images and record audio, which is the quickest way to see how far a new game gets.
 
-Executables on retail discs are encrypted. `PSP_DECRYPT` names any tool that is called as `tool <in> <out>` and writes a plain ELF, such as DecEboot or pspdecrypt. PPSSPP can also dump a decrypted executable while it runs a game (Settings, Tools, Developer tools).
+Executables on retail discs are encrypted. `PSP_DECRYPT` names the decrypter to use: the directory or binary of pspdecrypt or DecEboot. PPSSPP can also dump a decrypted executable while it runs a game (Settings, Tools, Developer tools).
 
 Set your expectations accordingly: two games have been brought up so far, and both are Ready at Dawn titles built on the same engine, so they say little about how far a game from another studio gets. Another game will most likely stop at a system call nobody implemented yet, which is logged as `[hle] unimplemented ...`, or use a GE feature this renderer does not handle. [docs/internals.md](docs/internals.md) describes the tools for finding out what is missing, and the code is organized so that adding a call is a few lines.
 

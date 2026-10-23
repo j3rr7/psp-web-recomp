@@ -182,6 +182,8 @@
       <button id="export-saves" type="button" title="Download your saves as a ZIP file">Export saves</button>
       <button id="import-saves" type="button" title="Add saves from a ZIP file">Import saves</button>
       <input id="import-file" type="file" accept=".zip,application/zip" hidden>
+      <button id="download-log" type="button" title="Download the full console log as a text file">Download log</button>
+      <button id="pause" type="button" title="Pause or resume the guest (state is dumped to the log)">Pause</button>
       <button id="sound" type="button">Mute</button>
       <button id="controls-toggle" type="button" hidden>Hide controls</button>
       <button id="fullscreen" type="button">Fullscreen</button>
@@ -234,10 +236,51 @@
     statusEl.className = 'status err';
   }
   var fpsEl = document.getElementById('fps');
+  // Keep every printed line in an array as well as in the DOM pre. The
+  // DOM text is trimmed to bound memory, which would drop the earliest and
+  // most useful boot lines from a download; the array retains them up to
+  // a much larger cap.
+  var LOG_MAX_LINES = 200000;
+  var logLines = [];
   function appendLog(text) {
     logEl.textContent += text + '\n';
     if (logEl.textContent.length > 200000) logEl.textContent = logEl.textContent.slice(-150000);
     logEl.scrollTop = logEl.scrollHeight;
+    // printErr may provide a multi-line string; keep each line separate.
+    var parts = String(text).split('\n');
+    for (var i = 0; i < parts.length; i++) logLines.push(parts[i]);
+    if (logLines.length > LOG_MAX_LINES) logLines.splice(0, logLines.length - LOG_MAX_LINES);
+  }
+  // Snapshot of page/emulator state placed at the top of a downloaded log so a
+  // report can be understood without the reporter explaining the setup.
+  function logHeader() {
+    var lines = [
+      'PSP Web Recomp console log',
+      'captured: ' + new Date().toISOString(),
+      'url: ' + location.href,
+      'user agent: ' + navigator.userAgent,
+      'crossOriginIsolated: ' + !!window.crossOriginIsolated,
+      'log lines: ' + logLines.length
+    ];
+    if (fpsEl && fpsEl.title) lines.push('renderer: ' + fpsEl.title);
+    lines.push('', '--- log ---', '');
+    return lines.join('\n');
+  }
+  function downloadLog() {
+    try {
+      var blob = new Blob([logHeader() + logLines.join('\n') + '\n'], { type: 'text/plain' });
+      var stamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19);
+      var link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = 'pspweb-log-' + stamp + '.txt';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setTimeout(function () { URL.revokeObjectURL(link.href); }, 10000);
+      note('Log downloaded');
+    } catch (e) {
+      note('Could not download log: ' + e);
+    }
   }
   var frames = 0, cpuTotal = 0, stepTotal = 0, lastFps = performance.now(), image = null;
   var SAVE_ROOT = '/game/ms0/PSP/SAVEDATA';
@@ -267,11 +310,26 @@
   var Module = {
     canvas: document.getElementById('canvas'),
     // ?profile: per-frame timing breakdown in the log (see README).
-    preRun: [mountSaves].concat(/[?&]profile\b/.test(location.search) ? [function () { ENV.PSPWEB_FRAME_PROFILE = '1'; }] : []),
+    // ?trace=io,hle,all: enable the guest I/O and HLE call traces, which the
+    // page's log pane then shows (PSPWEB_TRACE_IO / PSPWEB_TRACE_HLE).
+    preRun: [mountSaves,
+      function () { if (/[?&]profile\b/.test(location.search)) ENV.PSPWEB_FRAME_PROFILE = '1'; },
+      function () {
+        var m = location.search.match(/[?&]trace=([^&]+)/);
+        if (!m) return;
+        var want = m[1];
+        if (want === 'all' || /\bio\b/.test(want)) ENV.PSPWEB_TRACE_IO = '1';
+        if (want === 'all' || /\bhle\b/.test(want)) ENV.PSPWEB_TRACE_HLE = '1';
+      }],
     print: function (text) { console.log(text); appendLog(text); },
     printErr: function (text) { console.warn(text); appendLog(text); },
     setStatus: function (text) { if (text) statusEl.textContent = text; },
     pspStatus: function (text) {
+      if (text === 'paused') {
+        statusEl.textContent = 'Paused';
+        statusEl.className = 'status';
+        return;
+      }
       var running = text === 'running';
       statusEl.textContent = running ? 'Running' : 'Stopped: ' + text;
       statusEl.className = 'status ' + (running || text === 'exit' ? 'ok' : 'err');
@@ -770,6 +828,28 @@
   });
   var importInput = document.getElementById('import-file');
   document.getElementById('import-saves').addEventListener('click', function () { importInput.click(); });
+  document.getElementById('download-log').addEventListener('click', downloadLog);
+  // Pause/resume the guest.  Pausing freezes the emulator and dumps the thread
+  // and wait state to the log, which is what makes a hang capturable: pause,
+  // then Download log.  Space toggles it as well.
+  var pauseButton = document.getElementById('pause');
+  var paused = false;
+  function updatePauseButton() { pauseButton.textContent = paused ? 'Resume' : 'Pause'; }
+  updatePauseButton();
+  pauseButton.addEventListener('click', function () {
+    if (typeof Module._pspweb_set_paused !== 'function') { note('Pause is unavailable in this build'); return; }
+    paused = !!Module._pspweb_set_paused(paused ? 0 : 1);
+    updatePauseButton();
+    note(paused ? 'Paused \u2014 download the log to capture the state' : 'Resumed');
+  });
+  // Space toggles pause unless the save dialog is open (there Space confirms) or
+  // a control already uses it (the game's key map does not).
+  window.addEventListener('keydown', function (e) {
+    if (e.code !== 'Space' || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (saveUi.info) return;
+    e.preventDefault();
+    pauseButton.click();
+  });
   importInput.addEventListener('change', async function () {
     var file = importInput.files[0];
     importInput.value = '';

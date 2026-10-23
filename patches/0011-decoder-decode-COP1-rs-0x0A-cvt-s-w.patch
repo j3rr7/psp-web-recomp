@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jeremy Fanuel <jeremy@jerem.my.id>
+Date: Fri, 23 Oct 2026 10:00:00 +0200
+Subject: [PATCH] decoder: decode COP1 rs=0x0A cvt.s.w
+
+Fat Princess: Fistful of Cake uses a COP1 instruction with rs=0x0A and
+function 0x10 at callback entry points. This is cvt.s.w (convert 32-bit
+integer to single-precision float) in the PSP Allegrex encoding, but the
+decoder only handled rs=0x10 (S-format arithmetic) and rs=0x14 (cvt.s.w
+with fn=0x20). Add rs=0x0A with fn=0x10 as cvt.s.w.
+
+---
+ src/decoder.cpp | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/src/decoder.cpp b/src/decoder.cpp
+index 8a11aff..9a771bf 100644
+--- a/src/decoder.cpp
++++ b/src/decoder.cpp
+@@ -163,6 +163,10 @@ DecodedInstruction decode_allegrex(std::uint32_t word) {
+         } else if (d.rs == 0x14u && (word & 0x3Fu) == 0x20u) {
+             d.kind = OpcodeKind::CvtSW;
+             d.mnemonic = "cvt.s.w";
++        } else if (d.rs == 0x0Au && (word & 0x3Fu) == 0x10u) {
++            // COP1 rs=0x0A fn=0x10: cvt.s.w (convert word to single).
++            d.kind = OpcodeKind::CvtSW;
++            d.mnemonic = "cvt.s.w";
+         } else { d.kind = OpcodeKind::Unsupported; d.mnemonic = "cop1?"; }
+         break;
+     }
+
+-- 
+2.43.0

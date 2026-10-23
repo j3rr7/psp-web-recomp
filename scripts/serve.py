@@ -109,8 +109,8 @@ def main():
     port = int(args[1]) if len(args) > 1 else 8613
     Handler.mounts = mounts
     handler = partial(Handler, directory=directory)
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)
-    print(f"http://localhost:{port}/", flush=True)
+    server = http.server.ThreadingHTTPServer(("0.0.0.0", port), handler)
+    print(f"http://0.0.0.0:{port}/", flush=True)
     server.serve_forever()
 
 

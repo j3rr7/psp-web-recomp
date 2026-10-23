@@ -27,7 +27,7 @@ The scripts each do one step, and `scripts/port.sh` chains them:
 |---|---|
 | `setup.sh` | Fetch PSPRecomp, apply `patches/`, install the Emscripten SDK, build the tools |
 | `extract_iso.py` | Extract an ISO9660 image, optionally from inside a ZIP |
-| `decrypt.sh` | Decrypt `EBOOT.BIN` with the tool named by `PSP_DECRYPT` |
+| `decrypt.sh` | Decrypt `EBOOT.BIN` with pspdecrypt or DecEboot, named by `PSP_DECRYPT` |
 | `generate.sh` | Translate the executable to C++ with `psp_recomp` |
 | `manifest.py` | List the disc for streaming |
 | `build_web.sh`, `build_native.sh` | Build the page or the headless runner (`GEN_OPT` sets the optimization level of the generated code, `JOBS` the parallelism) |

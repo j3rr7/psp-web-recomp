@@ -40,6 +40,11 @@ inline constexpr std::uint32_t kUserPartitionEnd = 0x0A000000u;
 inline constexpr std::uint32_t kVramAddress = 0x04000000u;
 inline constexpr std::uint32_t kVramSize = 0x00200000u;
 
+// UMD drive status bits reported to guests.  The disc served by the webfs is
+// always mounted and readable, so every query reports present|ready|readable
+// (0x02|0x10|0x20).  Titles wait on UMD_READY (0x20) before streaming data.
+inline constexpr std::uint32_t kUmdDriveStat = 0x32u;
+
 enum class ThreadState { Dormant, Ready, Running, Waiting, Dead };
 enum class WaitType { None, Sleep, Delay, Vblank, ThreadEnd, Sema, EventFlag, Fpl, Io, Callback, Ge, Mutex, Mbx, CtrlRead };
 
@@ -96,16 +101,19 @@ struct OpenFile {
     std::FILE *file{};          // native host file
     const WebFile *web{};       // streamed disc file (browser build)
     std::uint64_t position{};   // web and decrypted files track their own position
-    std::string path;
+    std::string path{};
     std::int64_t async_result{};
     bool async_pending{};
     bool closing{};
     // Set once a PGD (DRM) file has been decrypted; reads come from here then.
-    std::shared_ptr<const std::vector<std::uint8_t>> plain;
+    std::shared_ptr<const std::vector<std::uint8_t>> plain{};
     std::uint32_t pgd_offset{}; // where the PGD container starts in the file
     bool virtual_disc{};        // whole-disc LBN handle (disc0:/sce_lbn0x0_size...)
     std::uint64_t virtual_size{};
-    std::string cached_relative;
+    std::string cached_relative{};
+    // sceIoSetAsyncCallback: the callback fired once this fd's async op lands.
+    std::int32_t async_cb{};
+    std::uint32_t async_cb_arg{};
 };
 
 struct DirectoryEntry {
@@ -156,6 +164,27 @@ struct SubInterrupt {
     std::uint32_t gp{};
     bool enabled{};
     std::int32_t running{}; // uid of the handler thread while it runs
+};
+
+// A kernel callback registered with sceKernelRegisterCallback.  Lower priority
+// numbers run first.  When pending and enabled, sceKernelCheckCallback will
+// start the handler as a short-lived thread.
+struct Callback {
+    std::uint32_t entry{};   // function address
+    std::uint32_t arg{};     // argument passed in a0
+    std::uint32_t arg1{};    // argument passed in a1
+    std::uint32_t gp{};      // global pointer passed in gp
+    std::int32_t priority{}; // priority level (lower = higher priority)
+    bool enabled{};          // whether the callback may run
+    bool pending{};          // whether it is waiting to be dispatched
+    std::int32_t running{};  // thread UID while the handler is running, 0 otherwise
+    // Set for callbacks registered with sceKernelRegisterExitCallback.  These
+    // are NOT VBlank-driven: the firmware only runs them from sceKernelExitGame.
+    bool exit_only{};
+    // Set for callbacks registered with sceUmdRegisterUMDCallBack.  The drive
+    // status word is delivered in a1 on every dispatch, matching the firmware's
+    // SceUmdCallback(int arg, int stat) signature.
+    bool umd{};
 };
 
 struct GeCallback {
@@ -246,6 +275,10 @@ public:
     void thread_returned(psprecomp::AllegrexContext &ctx);
     // Prints every thread with its state and what it waits on.
     void dump_threads() const;
+    // Prints the blocking state (per-thread waits plus the last HLE call each
+    // thread made, semaphores and open files) so a silent guest hang names what
+    // it is stuck on.  Safe to call from the host between frames.
+    void dump_diagnosis(const char *reason);
 
     // Host input: PSP button bits and analog stick (128 = centre).
     void set_pad(std::uint32_t buttons, std::uint8_t lx = 128u, std::uint8_t ly = 128u);
@@ -343,7 +376,13 @@ private:
     void sceKernelChangeThreadPriority(Ctx &ctx);
     void sceKernelWaitThreadEnd(Ctx &ctx);
     void sceKernelCreateCallback(Ctx &ctx);
+    void sceKernelRegisterCallback(Ctx &ctx);
+    void sceKernelRegisterExitCallback(Ctx &ctx);
     void sceKernelCheckCallback(Ctx &ctx);
+    // Runs a registered exit callback's handler, if any, before the game stops.
+    bool run_exit_callback();
+    void scePowerRegisterCallback(Ctx &ctx);
+    void sceUmdRegisterUMDCallBack(Ctx &ctx);
     void sceKernelGetSystemTimeLow(Ctx &ctx);
     void sceKernelGetSystemTimeWide(Ctx &ctx);
     void sceKernelGetSystemTime(Ctx &ctx);
@@ -435,9 +474,11 @@ private:
     void sceIoOpenAsync(Ctx &ctx);
     void sceIoReadAsync(Ctx &ctx);
     void sceIoLseekAsync(Ctx &ctx);
+    void sceIoLseek32Async(Ctx &ctx);
     void sceIoCloseAsync(Ctx &ctx);
     void sceIoWaitAsync(Ctx &ctx);
     void sceIoPollAsync(Ctx &ctx);
+    void sceIoSetAsyncCallback(Ctx &ctx);
     void sceIoIoctl(Ctx &ctx);
 
     // sceDisplay / sceGe_user.
@@ -490,6 +531,7 @@ private:
     void sceAudioOutput2ChangeLength(Ctx &ctx);
     void sceUmdCheckMedium(Ctx &ctx);
     void sceUmdGetDriveStat(Ctx &ctx);
+    void sceUmdWaitDriveStatCB(Ctx &ctx);
     void sceUtilityGetSystemParamInt(Ctx &ctx);
     void sceCtrlReadLatch(Ctx &ctx);
     void sceCtrlPeekLatch(Ctx &ctx);
@@ -527,6 +569,7 @@ private:
     std::map<std::int32_t, Mutex> mutexes_;
     std::map<std::int32_t, Mailbox> mailboxes_;
     std::map<std::pair<std::uint32_t, std::uint32_t>, SubInterrupt> sub_interrupts_; // (interrupt, sub) -> handler
+    std::map<std::int32_t, Callback> callbacks_; // uid -> kernel callback
     std::map<std::int32_t, Alarm> alarms_;
     std::map<std::int32_t, GeCallback> ge_callbacks_;
     std::mutex ge_events_mutex_;
@@ -584,6 +627,16 @@ private:
     std::set<std::string> fallback_logged_;
     bool halted_{};
     std::string halt_reason_;
+
+    // Progress watchdog.  hle_calls_ counts the HLE entries the guest made; the
+    // frame loop samples it and, when it has not moved for kStallFrames frames,
+    // prints dump_diagnosis() once.  last_hle_* remember the most recent HLE
+    // call per thread so the dump can name the call a blocked thread came from.
+    std::uint64_t hle_calls_{};
+    std::uint64_t last_progress_hle_calls_{};
+    int idle_frames_{};
+    bool diagnosed_{};
+    std::map<std::int32_t, std::string> last_hle_;
 };
 
 } // namespace pspweb

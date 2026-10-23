@@ -181,6 +181,8 @@ bool matches(const std::string &pattern, const std::string &name) {
     return p == pattern.size();
 }
 
+// Only the browser build renders the save dialog as JSON.
+#ifdef __EMSCRIPTEN__
 std::string json_string(const std::string &s) {
     std::string out = "\"";
     for (const unsigned char c : s) {
@@ -197,6 +199,7 @@ std::string json_string(const std::string &s) {
     }
     return out + "\"";
 }
+#endif
 
 class Store {
 public:

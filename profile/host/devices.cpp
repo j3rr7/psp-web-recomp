@@ -71,11 +71,11 @@ void Kernel::install_devices() {
     hle("sceUmdUser", 0x46EBB729u, "sceUmdCheckMedium", &Kernel::sceUmdCheckMedium);
     hle("sceUmdUser", 0x6B4A146Cu, "sceUmdGetDriveStat", &Kernel::sceUmdGetDriveStat);
     hle("sceUmdUser", 0xC6183D47u, "sceUmdActivate", &Kernel::return_zero);
-    hle("sceUmdUser", 0x56202973u, "sceUmdWaitDriveStatWithTimer", &Kernel::return_zero);
-    hle("sceUmdUser", 0x8EF08FCEu, "sceUmdWaitDriveStat", &Kernel::return_zero);
-    hle("sceUmdUser", 0x4A9E5E29u, "sceUmdWaitDriveStatCB", &Kernel::return_zero);
+    hle("sceUmdUser", 0x56202973u, "sceUmdWaitDriveStatWithTimer", &Kernel::sceUmdWaitDriveStatCB);
+    hle("sceUmdUser", 0x8EF08FCEu, "sceUmdWaitDriveStat", &Kernel::sceUmdWaitDriveStatCB);
+    hle("sceUmdUser", 0x4A9E5E29u, "sceUmdWaitDriveStatCB", &Kernel::sceUmdWaitDriveStatCB);
     hle("sceUmdUser", 0x6AF9B50Au, "sceUmdCancelWaitDriveStat", &Kernel::return_zero);
-    hle("sceUmdUser", 0xAEE7404Du, "sceUmdRegisterUMDCallBack", &Kernel::return_zero);
+    hle("sceUmdUser", 0xAEE7404Du, "sceUmdRegisterUMDCallBack", &Kernel::sceUmdRegisterUMDCallBack);
     hle("sceUmdUser", 0xBD2BDE07u, "sceUmdUnRegisterUMDCallBack", &Kernel::return_zero);
     hle("sceUmdUser", 0x20628E6Fu, "sceUmdGetErrorStat", &Kernel::return_zero);
     hle("sceImpose", 0x24FD7BCFu, "sceImposeGetLanguageMode", &Kernel::sceImposeGetLanguageMode);
@@ -130,7 +130,7 @@ void Kernel::install_devices() {
     // Keys for downloadable content; disc files use sceIoIoctl instead.
     hle("scePspNpDrm_user", 0xA1336091u, "sceNpDrmSetLicenseeKey", &Kernel::return_zero);
     hle("scePspNpDrm_user", 0x08D98894u, "sceNpDrmEdataSetupKey", &Kernel::return_zero);
-    hle("scePower", 0x04B7766Eu, "scePowerRegisterCallback", &Kernel::return_zero);
+    hle("scePower", 0x04B7766Eu, "scePowerRegisterCallback", &Kernel::scePowerRegisterCallback);
     hle("scePower", 0xDFA8BAF8u, "scePowerUnregisterCallback", &Kernel::return_zero);
 }
 
@@ -350,7 +350,23 @@ void Kernel::sceAudioOutput2ChangeLength(Ctx &ctx) {
 // UMD, impose, display, clocks
 
 void Kernel::sceUmdCheckMedium(Ctx &ctx) { finish(ctx, 1u); }
-void Kernel::sceUmdGetDriveStat(Ctx &ctx) { finish(ctx, 0x32u); } // present, ready, readable
+void Kernel::sceUmdGetDriveStat(Ctx &ctx) { finish(ctx, kUmdDriveStat); } // present, ready, readable
+
+// The disc is always mounted by the time a guest asks, so the wait completes at
+// once.  Like the firmware, though, it also has to fire the registered UMD
+// callback with the ready status: titles block in this call and only proceed
+// when that callback has run.
+void Kernel::sceUmdWaitDriveStatCB(Ctx &ctx) {
+    (void)ctx.gpr[4]; // wanted status bits, satisfied immediately below
+    for (auto &[uid, cb] : callbacks_) {
+        (void)uid;
+        if (cb.umd) {
+            cb.arg1 = kUmdDriveStat;
+            cb.pending = true;
+        }
+    }
+    finish(ctx, 0u);
+}
 
 void Kernel::sceUtilityGetSystemParamInt(Ctx &ctx) {
     std::uint32_t value = 0u;

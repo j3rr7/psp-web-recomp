@@ -199,11 +199,18 @@ void Kernel::hle(const char *library, std::uint32_t nid, const char *name,
             const std::int32_t caller = current_uid_;
             std::cerr << "[hle] " << caller << " " << name << "(" << hex(ctx.gpr[4]) << ", " << hex(ctx.gpr[5]) << ", "
                       << hex(ctx.gpr[6]) << ", " << hex(ctx.gpr[7]) << ", " << hex(ctx.gpr[8]) << ")";
+            ++hle_calls_;
             (this->*handler)(ctx);
             std::cerr << (current_uid_ == caller ? " -> " + hex(ctx.gpr[2]) : std::string(" -> (switched)")) << "\n";
         });
     } else {
-        rt_.register_hle(library, nid, [this, handler](psprecomp::Runtime &, Ctx &ctx) { (this->*handler)(ctx); });
+        rt_.register_hle(library, nid, [this, handler, name](psprecomp::Runtime &, Ctx &ctx) {
+            ++hle_calls_;
+            // Cheap always-on breadcrumb: the watchdog dump uses it to name the
+            // HLE call each thread is sitting in when the guest stalls.
+            last_hle_[current_uid_] = name;
+            (this->*handler)(ctx);
+        });
     }
     rt_.nids().add(library, nid, name);
     registered_.insert(std::string(library) + ":" + hex(nid));
@@ -247,6 +254,7 @@ void Kernel::install(const std::vector<psprecomp::PspImport> &imports) {
     hle(tm, 0x278C0DF5u, "sceKernelWaitThreadEnd", &Kernel::sceKernelWaitThreadEnd);
     hle(tm, 0x840E8133u, "sceKernelWaitThreadEndCB", &Kernel::sceKernelWaitThreadEnd);
     hle(tm, 0xE81CAF8Fu, "sceKernelCreateCallback", &Kernel::sceKernelCreateCallback);
+    hle(tm, 0x0C3B4778u, "sceKernelRegisterCallback", &Kernel::sceKernelRegisterCallback);
     hle(tm, 0x349D6D6Cu, "sceKernelCheckCallback", &Kernel::sceKernelCheckCallback);
     hle(tm, 0x369ED59Du, "sceKernelGetSystemTimeLow", &Kernel::sceKernelGetSystemTimeLow);
     hle(tm, 0x82BC5777u, "sceKernelGetSystemTimeWide", &Kernel::sceKernelGetSystemTimeWide);
@@ -304,7 +312,7 @@ void Kernel::install(const std::vector<psprecomp::PspImport> &imports) {
 
     hle("LoadExecForUser", 0x05572A5Fu, "sceKernelExitGame", &Kernel::sceKernelExitGame);
     hle("LoadExecForUser", 0x2AC9954Bu, "sceKernelExitGameWithStatus", &Kernel::sceKernelExitGame);
-    hle("LoadExecForUser", 0x4AC57943u, "sceKernelRegisterExitCallback", &Kernel::return_zero);
+    hle("LoadExecForUser", 0x4AC57943u, "sceKernelRegisterExitCallback", &Kernel::sceKernelRegisterExitCallback);
 
     const char *mm = "ModuleMgrForUser";
     hle(mm, 0xD675EBB8u, "sceKernelSelfStopUnloadModule", &Kernel::sceKernelSelfStopUnloadModule);
@@ -343,6 +351,8 @@ void Kernel::install(const std::vector<psprecomp::PspImport> &imports) {
     hle(io, 0xE23EEC33u, "sceIoWaitAsync", &Kernel::sceIoWaitAsync);
     hle(io, 0x35DBD746u, "sceIoWaitAsyncCB", &Kernel::sceIoWaitAsync);
     hle(io, 0x3251EA56u, "sceIoPollAsync", &Kernel::sceIoPollAsync);
+    hle(io, 0x1B385D8Fu, "sceIoLseek32Async", &Kernel::sceIoLseek32Async);
+    hle(io, 0xA12A0514u, "sceIoSetAsyncCallback", &Kernel::sceIoSetAsyncCallback);
 
     const char *dp = "sceDisplay";
     hle(dp, 0x0E20F177u, "sceDisplaySetMode", &Kernel::sceDisplaySetMode);
@@ -683,6 +693,11 @@ bool Kernel::frame(double budget_ms) {
         }
     }
     run_interrupts(kVblankInterrupt);
+    // VBlank fired: mark all enabled callbacks as pending so
+    // sceKernelCheckCallback can dispatch them to the game.
+    for (auto &[uid, cb] : callbacks_) {
+        if (cb.enabled && !cb.exit_only && !cb.pending && cb.running == 0) cb.pending = true;
+    }
 
     const auto deadline = Clock::now() + std::chrono::microseconds(static_cast<std::int64_t>(budget_ms * 1000.0));
     while (!halted_ && Clock::now() < deadline) {
@@ -736,8 +751,26 @@ bool Kernel::frame(double budget_ms) {
 
     drain_audio(frame_start_guest_us_ + kFrameUs);
     if (halted_) {
-        if (halt_reason_ != "exit") std::cerr << "[kernel] halted: " << halt_reason_ << "\n";
+        std::cerr << "[kernel] halted: " << halt_reason_ << "\n";
+        dump_diagnosis("halt");
         return false;
+    }
+    // Progress watchdog: if the guest keeps running frames but never reaches a
+    // new HLE call, it is spinning in guest code that polls something the host
+    // never satisfies.  Report the blocking state once so a silent browser hang
+    // is diagnosable.  PSPWEB_STALL_FRAMES overrides the threshold.
+    static const int stall_frames = [] {
+        if (const char *env = std::getenv("PSPWEB_STALL_FRAMES"); env != nullptr && *env != '\0')
+            return std::max(1, std::atoi(env));
+        return 120;
+    }();
+    if (hle_calls_ != last_progress_hle_calls_) {
+        last_progress_hle_calls_ = hle_calls_;
+        idle_frames_ = 0;
+        diagnosed_ = false;
+    } else if (++idle_frames_ >= stall_frames && !diagnosed_) {
+        diagnosed_ = true;
+        dump_diagnosis("stalled");
     }
     for (const auto &[uid, t] : threads_) {
         (void)uid;
@@ -746,6 +779,80 @@ bool Kernel::frame(double budget_ms) {
     }
     halt_reason_ = "no threads left";
     return false;
+}
+
+namespace {
+const char *wait_name(WaitType w) {
+    switch (w) {
+    case WaitType::None: return "none";
+    case WaitType::Sleep: return "sleep";
+    case WaitType::Delay: return "delay";
+    case WaitType::Vblank: return "vblank";
+    case WaitType::ThreadEnd: return "thread-end";
+    case WaitType::Sema: return "semaphore";
+    case WaitType::EventFlag: return "event-flag";
+    case WaitType::Fpl: return "fpl";
+    case WaitType::Io: return "io";
+    case WaitType::Callback: return "callback";
+    case WaitType::Ge: return "ge";
+    case WaitType::Mutex: return "mutex";
+    case WaitType::Mbx: return "mbx";
+    case WaitType::CtrlRead: return "ctrl";
+    }
+    return "?";
+}
+const char *state_name(ThreadState s) {
+    switch (s) {
+    case ThreadState::Dormant: return "dormant";
+    case ThreadState::Ready: return "ready";
+    case ThreadState::Running: return "running";
+    case ThreadState::Waiting: return "waiting";
+    case ThreadState::Dead: return "dead";
+    }
+    return "?";
+}
+} // namespace
+
+// Prints everything needed to identify a silent hang: each live thread's state,
+// what it waits on, and the last HLE call it made, plus open files and the
+// semaphores a waiter could be blocked on.
+void Kernel::dump_diagnosis(const char *reason) {
+    const std::string tag = std::string("[") + reason + "]";
+    std::cerr << tag << " guest has made no HLE progress for " << idle_frames_ << " frames"
+              << " (hle calls total " << hle_calls_ << ", vcount " << display_.vcount << ")\n";
+    // Frame counter and display register state: a game that never reaches a
+    // framebuffer flip (or one that never leaves a black buffer up) is a
+    // different bug from one that hangs inside a frame, and the log above has
+    // to tell them apart without a rebuild.
+    std::cerr << tag << " display: vcount=" << display_.vcount << " flips=" << display_.flips
+              << " framebuffer=0x" << std::hex << display_.framebuffer << std::dec
+              << " stride=" << display_.stride << " format=" << display_.format << "\n";
+    std::cerr << tag << " threads:\n";
+    for (const auto &[uid, t] : threads_) {
+        std::cerr << tag << "   " << uid << " " << t.name << " prio=" << t.priority << " " << state_name(t.state)
+                  << " wait=" << wait_name(t.wait);
+        // Vblank, CtrlRead and Ge also hold a count worth seeing (the GE list
+        // id, for instance), so only the two wait types that never print one
+        // are skipped.
+        if (t.state == ThreadState::Waiting && t.wait != WaitType::Delay && t.wait != WaitType::Sleep) {
+            std::cerr << " on=0x" << std::hex << t.wait_uid << std::dec << " count=" << t.wait_count;
+        }
+        if (auto it = last_hle_.find(uid); it != last_hle_.end()) std::cerr << " last-hle=" << it->second;
+        std::cerr << " pc=0x" << std::hex << t.ctx.pc << " ra=0x" << t.ctx.gpr[31] << std::dec << "\n";
+    }
+    if (!semaphores_.empty()) {
+        std::cerr << tag << " semaphores:\n";
+        for (const auto &[uid, s] : semaphores_) {
+            std::cerr << tag << "   " << uid << " " << s.name << " count=" << s.count << " max=" << s.max << "\n";
+        }
+    }
+    if (!files_.empty()) {
+        std::cerr << tag << " open files: " << files_.size() << ", last=";
+        if (!files_.rbegin()->second.path.empty()) std::cerr << files_.rbegin()->second.path;
+        std::cerr << "\n";
+    }
+    std::cerr << tag << " hint: a thread waiting on a semaphore/event-flag/thread-end that no other thread can signal"
+              << " is the usual boot hang; compare each waiter's wait target against what is still alive above.\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -946,8 +1053,88 @@ void Kernel::sceKernelWaitThreadEnd(Ctx &ctx) {
     block(ctx, WaitType::ThreadEnd, 0u);
 }
 
-void Kernel::sceKernelCreateCallback(Ctx &ctx) { finish(ctx, static_cast<std::uint32_t>(new_uid())); }
-void Kernel::sceKernelCheckCallback(Ctx &ctx) { finish(ctx, 0u); }
+void Kernel::sceKernelCreateCallback(Ctx &ctx) {
+    // sceKernelCreateCallback(const char *name, SceKernelCallbackFunction func, void *arg)
+    // a0 names the callback, a1 is the entry point and a2 the handler argument.
+    const std::int32_t uid = new_uid();
+    callbacks_[uid] = Callback{ctx.gpr[5], ctx.gpr[6], 0u, ctx.gpr[28], 0, true, false, 0, false};
+    finish(ctx, static_cast<std::uint32_t>(uid));
+}
+
+void Kernel::sceKernelRegisterCallback(Ctx &ctx) {
+    const std::int32_t priority = static_cast<std::int32_t>(ctx.gpr[4]);
+    const std::uint32_t entry_ptr = ctx.gpr[5];
+    const std::uint32_t common = ctx.gpr[6];
+    (void)common; // the handler argument comes from entry_ptr+4; a2 is unused here
+    auto &m = rt_.memory();
+    const std::uint32_t entry = m.load32(entry_ptr);
+    const std::uint32_t arg = m.load32(entry_ptr + 4u);
+    const std::uint32_t gp = m.load32(entry_ptr + 8u);
+    const std::int32_t uid = new_uid();
+    callbacks_[uid] = Callback{entry, arg, 0u, gp, priority, true, false, 0, false};
+    finish(ctx, static_cast<std::uint32_t>(uid));
+}
+
+// sceKernelRegisterExitCallback(SceUID cbid): the named callback runs only when
+// the game exits, never on VBlank.  Without this, the exit handler was swept as
+// a plain callback every frame and tore the game down during init.
+void Kernel::sceKernelRegisterExitCallback(Ctx &ctx) {
+    const std::int32_t uid = static_cast<std::int32_t>(ctx.gpr[4]);
+    if (auto it = callbacks_.find(uid); it != callbacks_.end()) it->second.exit_only = true;
+    finish(ctx, 0u);
+}
+
+void Kernel::sceKernelCheckCallback(Ctx &ctx) {
+    // Clear running callbacks whose handler threads have finished.
+    for (auto &[uid, cb] : callbacks_) {
+        if (cb.running != 0 && !threads_.contains(cb.running)) cb.running = 0;
+    }
+    // Find the highest-priority pending enabled callback.
+    std::int32_t best_uid = 0;
+    std::int32_t best_priority = 0x7FFFFFFF;
+    for (auto &[uid, cb] : callbacks_) {
+        if (!cb.enabled || cb.exit_only || !cb.pending || cb.running != 0) continue;
+        if (cb.priority < best_priority) {
+            best_priority = cb.priority;
+            best_uid = uid;
+        }
+    }
+    if (best_uid == 0) {
+        finish(ctx, 0u);
+        return;
+    }
+    auto &cb = callbacks_[best_uid];
+    cb.pending = false;
+    // UMD callbacks take the drive status in a1; refresh it so the handler sees
+    // the current state rather than the value captured when it was registered.
+    if (cb.umd) cb.arg1 = kUmdDriveStat;
+    const std::int32_t handler_uid = start_handler(cb.entry, cb.gp, cb.arg, cb.arg1, nullptr);
+    if (handler_uid == 0) {
+        cb.pending = true; // re-mark the callback if the handler fails to start.
+        finish(ctx, 0u);
+        return;
+    }
+    cb.running = handler_uid;
+    finish(ctx, static_cast<std::uint32_t>(handler_uid));
+}
+
+void Kernel::scePowerRegisterCallback(Ctx &ctx) {
+    const std::int32_t uid = static_cast<std::int32_t>(ctx.gpr[5]);
+    if (auto it = callbacks_.find(uid); it != callbacks_.end()) it->second.pending = true;
+    finish(ctx, 0u);
+}
+
+void Kernel::sceUmdRegisterUMDCallBack(Ctx &ctx) {
+    const std::int32_t uid = static_cast<std::int32_t>(ctx.gpr[4]);
+    if (auto it = callbacks_.find(uid); it != callbacks_.end()) {
+        // The firmware calls the handler as SceUmdCallback(int arg, int stat), so
+        // the current drive status has to reach a1 on each dispatch.
+        it->second.umd = true;
+        it->second.arg1 = kUmdDriveStat;
+        it->second.pending = true;
+    }
+    finish(ctx, 0u);
+}
 
 void Kernel::sceKernelGetSystemTimeLow(Ctx &ctx) { finish(ctx, static_cast<std::uint32_t>(now_us())); }
 void Kernel::sceKernelGetSystemTimeWide(Ctx &ctx) { finish64(ctx, now_us()); }
@@ -1527,8 +1714,53 @@ void Kernel::sceKernelPrintf(Ctx &ctx) {
 // ---------------------------------------------------------------------------
 // LoadExecForUser / ModuleMgrForUser / StdioForUser
 
+// The exit callback registered via sceKernelRegisterExitCallback is only ever
+// run from here.  It performs the game's own thread/semaphore teardown.
+bool Kernel::run_exit_callback() {
+    for (auto &[uid, cb] : callbacks_) {
+        if (!cb.exit_only || !cb.enabled || cb.entry == 0u) continue;
+        const std::int32_t handler_uid = start_handler(cb.entry, cb.gp, cb.arg, 0u, nullptr);
+        if (handler_uid == 0) return false;
+        cb.running = handler_uid;
+        cb.pending = false;
+        // Drain the handler to completion; it runs at priority 1 (higher than
+        // the caller) so it gets scheduled immediately.
+        const auto deadline = Clock::now() + std::chrono::milliseconds(2000);
+        while (!halted_ && Clock::now() < deadline) {
+            if (!threads_.contains(handler_uid)) break;
+            if (Thread *next = pick_ready()) {
+                load_thread(*next);
+            } else {
+                const std::uint64_t wake_at = earliest_timed_wake();
+                if (wake_at != 0u && wake_at > now_us()) warp_us_ += wake_at - now_us();
+            }
+            rt_.run(rt_.cpu().pc, std::numeric_limits<std::uint64_t>::max());
+            const std::string &r = rt_.stop_reason();
+            if (r == "exit") break;
+        }
+        return true;
+    }
+    return false;
+}
+
 void Kernel::sceKernelExitGame(Ctx &ctx) {
+    // A title calling this during boot has already decided it cannot carry on
+    // (a missing utility, a checked failure) and the log does not say why: the
+    // call is usually the last thing the guest does before it goes quiet, and
+    // every thread then parks in a delay wait while the page keeps rendering
+    // nothing, so it reads as a hang.  Report it loudly with enough state to
+    // tell "the game asked to quit" apart from "the guest wedged", name the
+    // caller, and refuse to schedule another frame so the page shows it stopped.
+    const Thread *self = current();
+    std::cerr << "[kernel] *** sceKernelExitGame: the guest asked to exit at vcount " << display_.vcount
+              << ", frame " << display_.flips << " flips, from thread "
+              << (self != nullptr ? self->name : std::string("<none>"))
+              << " (" << current_uid_ << ") pc=0x" << std::hex << rt_.cpu().pc << " ra=0x" << ctx.gpr[31]
+              << std::dec << " ***\n";
+    dump_diagnosis("exitgame");
     finish(ctx, 0u);
+    // Give the exit callback a chance to tear the game down cleanly.
+    run_exit_callback();
     halted_ = true;
     halt_reason_ = "exit";
     rt_.stop("exit");
