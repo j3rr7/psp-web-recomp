@@ -467,8 +467,16 @@
       stepTotal += steps || 1;
       var now = performance.now();
       if (now - lastFps >= 1000) {
-        // CPU time per game frame: above ~16 ms the browser can no longer keep 60.
-        fpsEl.textContent = Math.round(frames * 1000 / (now - lastFps)) + ' FPS' +
+        // Two rates matter and they are not the same: `frames` is the present
+        // rate (how often the picture is handed to the display, capped at the
+        // refresh rate), while `stepTotal` is how many guest frames actually
+        // ran.  The game's own clock advances one guest frame per step, so
+        // "guest" is the number to watch: it should sit at ~60.  If it runs
+        // well above 60 while the present rate is pinned at 60, the game is
+        // running too fast (see the 16.683 ms gate in web_frame).
+        var present = Math.round(frames * 1000 / (now - lastFps));
+        var guest = Math.round(stepTotal * 1000 / (now - lastFps));
+        fpsEl.textContent = present + ' FPS' + ' · guest ' + guest +
           (cpuTotal > 0 ? ' · CPU ' + (cpuTotal / stepTotal).toFixed(1) + ' ms' : '');
         frames = 0; cpuTotal = 0; stepTotal = 0; lastFps = now;
       }
@@ -875,23 +883,35 @@
   function hex8(n) { return ('0' + (n & 0xFF).toString(16).toUpperCase()).slice(-2); }
   function hex32(n) { return ('0000000' + (n >>> 0).toString(16).toUpperCase()).slice(-8); }
 
-  // Renders 256 bytes from dumpBase: address, hex, and printable ASCII.
+  // Renders 256 bytes from dumpBase: address, hex, and printable ASCII.  The
+  // bytes come back through Module.pspDump (see pspweb_dump_to_js): the page
+  // must not rely on Module.HEAPU8, which this build does not export.
+  var memDumpBase = 0, memDumpLength = 256;
   function renderDump() {
-    if (!memDump || !Module._pspweb_read_range) return;
-    var len = 256, ptr = Module._malloc(len);
-    var got = Module._pspweb_read_range(memState.dumpBase, len, ptr);
-    if (!got) {
-      memDump.textContent = '0x' + hex32(memState.dumpBase) + '  (out of range)';
-      Module._free(ptr);
+    if (!memDump) return;
+    if (!Module._pspweb_dump_to_js) {
+      memDump.textContent = '(memory inspector unavailable)';
       return;
     }
-    var bytes = Module.HEAPU8.subarray(ptr, ptr + got);
+    var len = 256, ptr = Module._malloc(len);
+    memDumpBase = memState.dumpBase;
+    memDumpLength = len;
+    Module._pspweb_dump_to_js(memState.dumpBase, len, ptr);
+    Module._free(ptr);
+  }
+
+  Module.pspDump = function (address, bytes) {
+    if (!memDump) return;
+    if (!bytes || !bytes.length) {
+      memDump.textContent = '0x' + hex32(address >>> 0) + '  (out of range)';
+      return;
+    }
     var lines = [];
-    for (var i = 0; i < got; i += 16) {
-      var addr = '0x' + hex32(memState.dumpBase + i);
+    for (var i = 0; i < bytes.length; i += 16) {
+      var addr = '0x' + hex32((address + i) >>> 0);
       var hex = '', ascii = '';
       for (var j = 0; j < 16; j++) {
-        if (i + j < got) {
+        if (i + j < bytes.length) {
           var b = bytes[i + j];
           hex += hex8(b) + ' ';
           ascii += (b >= 32 && b < 127) ? String.fromCharCode(b) : '.';
@@ -900,8 +920,7 @@
       lines.push(addr + '  ' + hex + ' ' + ascii);
     }
     memDump.textContent = lines.join(LF);
-    Module._free(ptr);
-  }
+  };
 
   function renderHits() {
     if (!memHits) return;

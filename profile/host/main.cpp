@@ -410,6 +410,18 @@ extern "C" EMSCRIPTEN_KEEPALIVE std::uint32_t pspweb_read_range(std::uint32_t ad
     return length;
 }
 
+// Hex-dump helper for the page.  The page cannot rely on Module.HEAPU8 being
+// exported, so instead of returning a pointer to read, this copies the range
+// into `out` and hands the bytes to Module.pspDump as a Uint8Array through
+// EM_ASM (the same way the audio sink passes samples).  `out` is a
+// Module._malloc buffer the page owns.
+extern "C" EMSCRIPTEN_KEEPALIVE void pspweb_dump_to_js(std::uint32_t address, std::uint32_t length, std::uint8_t *out) {
+    const std::uint32_t got = pspweb_read_range(address, length, out);
+    EM_ASM({
+        if (Module.pspDump) Module.pspDump($0, HEAPU8.subarray($1, $1 + $2));
+    }, address, out, got);
+}
+
 namespace {
 // Reports a scan result to the page as JSON.
 void report_scan(const pspweb::ScanResult &result) {
