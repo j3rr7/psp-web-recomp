@@ -7,6 +7,7 @@
 
 #include "ge.hpp"
 #include "cheats.hpp"
+#include "memory_scan.hpp"
 #include "ge_worker.hpp"
 #include "generated_modules.hpp"
 #include "webfs.hpp"
@@ -276,6 +277,11 @@ public:
     // Parses and installs a cheat file's contents, keeping existing toggles by
     // id.  Returns the load result so a caller can report parse errors.
     CheatLoadResult load_cheats(const std::string &text);
+
+    // The cheat finder: scan guest memory for a value and narrow the candidate
+    // set frame by frame, so an address can be discovered without a debugger.
+    // See docs/cheats.md ("Finding a cheat in the browser").
+    [[nodiscard]] MemoryScanner &scanner() noexcept { return scanner_; }
 
     // Copies the visible 480x272 framebuffer into `rgba` (480*272*4 bytes).
     void read_framebuffer(std::uint8_t *rgba) const;
@@ -607,8 +613,9 @@ private:
     void install_savedata();
     std::shared_ptr<void> savedata_;
     // cheats.cpp: the cheat engine and its host actions.
-    void install_cheats();
+    void install_cheats() ;
     CheatEngine cheats_;
+    MemoryScanner scanner_;
     // When a live cheat sets frozen/held, the timestamp getters return a fixed
     // value instead of now_us(); the base is captured on the frame it is armed.
     bool cheat_freeze_clock_{false};

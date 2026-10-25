@@ -49,6 +49,10 @@ Games save the way they do on a PSP, into `PSP/SAVEDATA` on the memory stick, an
 
 Browser storage can be cleared along with a site's data, and it does not travel between browsers or devices. **Export saves** downloads everything as a ZIP file laid out like the PSP's `SAVEDATA` folder, and **Import saves** adds the saves from such a file. Saves copied from a real PSP or from PPSSPP are usually encrypted and will not load yet.
 
+## Cheats
+
+A cheat file (CWCheat-style text, supplied by you) can be loaded from the **Cheats** button to poke values in the game's memory or hold the clock still. No cheats are built in or shipped. The **Memory** button opens an inspector and a value search, so you can find an address inside the running game and turn it into a cheat without a debugger. [docs/cheats.md](docs/cheats.md) describes the format, the built-in host actions, the search, and the headless tools for testing a file.
+
 ## Hosting
 
 The page uses SharedArrayBuffer for its threads, so it has to be served cross-origin isolated, with `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`. `scripts/serve.py` sends both headers and supports the Range requests the disc streaming relies on. To try it on a phone, put a tunnel in front of it, for example `cloudflared tunnel --url http://127.0.0.1:8613`, which passes the headers through. Anyone with the address can load the game while the tunnel runs, so keep it to yourself and stop it when you are done.

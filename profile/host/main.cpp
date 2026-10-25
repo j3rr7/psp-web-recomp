@@ -379,6 +379,91 @@ extern "C" EMSCRIPTEN_KEEPALIVE void pspweb_set_cheat(const char *id, int enable
 // Re-reports the loaded cheats (the page calls this when it opens the panel).
 extern "C" EMSCRIPTEN_KEEPALIVE void pspweb_cheats_ping() { report_cheats(); }
 
+// ---------------------------------------------------------------------------
+// Memory inspector / cheat finder bridge.  The page uses these to read memory
+// for a hex viewer and to drive the scanner; results come back as JSON through
+// Module.pspScan.  See docs/cheats.md.
+extern "C" EMSCRIPTEN_KEEPALIVE std::uint32_t pspweb_peek8(std::uint32_t address) {
+    return g_session.runtime ? g_session.runtime->memory().load8(address) : 0u;
+}
+extern "C" EMSCRIPTEN_KEEPALIVE std::uint32_t pspweb_peek16(std::uint32_t address) {
+    return g_session.runtime ? g_session.runtime->memory().load16(address) : 0u;
+}
+extern "C" EMSCRIPTEN_KEEPALIVE std::uint32_t pspweb_peek32(std::uint32_t address) {
+    return g_session.runtime ? g_session.runtime->memory().load32(address) : 0u;
+}
+// Writes one 32-bit word from the UI.  A temporary poke for probing an address;
+// a cheat file is the durable way to change memory.
+extern "C" EMSCRIPTEN_KEEPALIVE int pspweb_poke32(std::uint32_t address, std::uint32_t value) {
+    if (!g_session.runtime || !g_session.runtime->memory().contains(address, 4u)) return 0;
+    g_session.runtime->memory().store32(address, value);
+    return 1;
+}
+// Copies `length` bytes of guest memory into `out` (a wasm-heap buffer the page
+// allocates), so a hex dump costs one call rather than one per byte.  Returns
+// the number of bytes copied; a range that is not wholly valid copies nothing.
+extern "C" EMSCRIPTEN_KEEPALIVE std::uint32_t pspweb_read_range(std::uint32_t address, std::uint32_t length, std::uint8_t *out) {
+    if (!g_session.runtime || out == nullptr || length == 0u) return 0u;
+    auto &memory = g_session.runtime->memory();
+    if (!memory.contains(address, length)) return 0u;
+    memory.copy_out(address, std::span<std::uint8_t>(out, length));
+    return length;
+}
+
+namespace {
+// Reports a scan result to the page as JSON.
+void report_scan(const pspweb::ScanResult &result) {
+    std::string out = "{\"ok\":";
+    out += result.ok ? "true" : "false";
+    out += ",\"total\":" + std::to_string(result.total);
+    out += ",\"note\":\"" + json_escape(result.note) + "\"";
+    out += ",\"hits\":[";
+    bool first = true;
+    for (const pspweb::ScanHit &hit : result.hits) {
+        if (!first) out += ',';
+        first = false;
+        out += "{\"address\":" + std::to_string(hit.address) + ",\"value\":" + std::to_string(hit.value) + "}";
+    }
+    out += "]}";
+    EM_ASM({ if (Module.pspScan) Module.pspScan(UTF8ToString($0)); }, out.c_str());
+}
+} // namespace
+
+// First scan.  `unknown` != 0 starts from every address in the region; `width`
+// is 1/2/4 bytes; `value` is the value to match when not scanning for unknown.
+extern "C" EMSCRIPTEN_KEEPALIVE void pspweb_scan_first(int width, std::uint32_t value, int unknown) {
+    if (!g_session.kernel) return;
+    const pspweb::ScanWidth w = width == 1 ? pspweb::ScanWidth::B8 : width == 2 ? pspweb::ScanWidth::B16 : pspweb::ScanWidth::B32;
+    const pspweb::ScanResult result = g_session.kernel->scanner().first_scan(
+        pspweb::ScanRegion::UserRam, w, value, unknown != 0);
+    std::cout << "[scan] " << result.note << "\n";
+    report_scan(result);
+}
+
+// Filter.  `filter` is one of equal/not-equal/changed/unchanged/increased/
+// decreased; `value` is used by equal/not-equal.  `pspweb_scan_refresh` re-reads
+// the values without narrowing the set.
+extern "C" EMSCRIPTEN_KEEPALIVE void pspweb_scan_filter(const char *filter, std::uint32_t value) {
+    if (!g_session.kernel) return;
+    const std::string key = filter != nullptr ? filter : "changed";
+    const pspweb::ScanFilter f = key == "equal"    ? pspweb::ScanFilter::Equal
+                       : key == "not-equal" ? pspweb::ScanFilter::NotEqual
+                       : key == "unchanged" ? pspweb::ScanFilter::Unchanged
+                       : key == "increased" ? pspweb::ScanFilter::Increased
+                       : key == "decreased" ? pspweb::ScanFilter::Decreased
+                                            : pspweb::ScanFilter::Changed;
+    report_scan(g_session.kernel->scanner().filter(f, value));
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void pspweb_scan_refresh() {
+    if (!g_session.kernel) return;
+    report_scan(g_session.kernel->scanner().refresh());
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void pspweb_scan_clear() {
+    if (g_session.kernel) g_session.kernel->scanner().clear();
+}
+
 namespace {
 // Creates the WebGL2 context on the calling thread (the GE thread when there
 // is one: the canvas has been handed to it) and the GL renderer.
@@ -521,6 +606,10 @@ int main(int argc, char **argv) {
     std::string cheat_file;   // --cheat: load a cheat file before running
     std::vector<std::string> cheat_enable;  // --cheat-enable ID (repeatable)
     std::vector<std::uint32_t> cheat_probes;  // --cheat-probe ADDR (repeatable)
+    // --scan WIDTH:VALUE  first scan for a value (VALUE="?" scans every address);
+    // --scan-filter SPEC[:VALUE]  a filter applied at --scan-at (default 60).
+    std::string scan_spec, scan_filter;
+    int scan_at = 60;
     bool use_gl = false, threads = true;
     struct Press { int frame, length; std::uint32_t buttons; };
     std::vector<Press> presses; // --press frame:buttons_hex:length
@@ -537,6 +626,9 @@ int main(int argc, char **argv) {
         else if (flag == "--cheat") cheat_file = argv[i + 1];
         else if (flag == "--cheat-enable") cheat_enable.push_back(argv[i + 1]);
         else if (flag == "--cheat-probe") cheat_probes.push_back(static_cast<std::uint32_t>(std::stoul(argv[i + 1], nullptr, 0)));
+        else if (flag == "--scan") scan_spec = argv[i + 1];
+        else if (flag == "--scan-filter") scan_filter = argv[i + 1];
+        else if (flag == "--scan-at") scan_at = std::stoi(argv[i + 1]);
         else if (flag == "--gl") use_gl = std::string(argv[i + 1]) != "0";
         else if (flag == "--scale") g_session.scale.store(std::stoi(argv[i + 1]));
         else if (flag == "--threads") threads = std::string(argv[i + 1]) != "0";
@@ -617,6 +709,39 @@ int main(int argc, char **argv) {
             if (!step(50.0)) break;
             ++frame;
             progress.store(frame);
+            // --scan / --scan-filter: exercise the cheat finder natively, so its
+            // logic is testable without a browser.  The scan runs once the guest
+            // has settled (frame == scan_at); a filter runs a few frames later.
+            if (!scan_spec.empty() && frame == scan_at) {
+                const auto colon = scan_spec.find(':');
+                const int width = std::stoi(scan_spec.substr(0, colon));
+                const std::string value_text = colon == std::string::npos ? "" : scan_spec.substr(colon + 1u);
+                const bool unknown = value_text == "?" || value_text.empty();
+                const std::uint32_t value = unknown ? 0u : static_cast<std::uint32_t>(std::stoul(value_text, nullptr, 0));
+                const pspweb::ScanWidth w = width == 1 ? pspweb::ScanWidth::B8 : width == 2 ? pspweb::ScanWidth::B16 : pspweb::ScanWidth::B32;
+                const pspweb::ScanResult r = g_session.kernel->scanner().first_scan(pspweb::ScanRegion::UserRam, w, value, unknown);
+                std::cout << "[scan] " << r.note << "\n";
+                for (std::size_t i = 0; i < std::min<std::size_t>(r.hits.size(), 8u); ++i)
+                    std::cout << "[scan]   0x" << std::hex << std::uppercase << r.hits[i].address
+                              << " = 0x" << std::setw(8) << std::setfill('0') << r.hits[i].value << std::dec << "\n";
+            }
+            if (!scan_filter.empty() && frame == scan_at + scan_at) {
+                const auto colon = scan_filter.find(':');
+                const std::string key = scan_filter.substr(0, colon);
+                const std::uint32_t value = colon == std::string::npos ? 0u
+                    : static_cast<std::uint32_t>(std::stoul(scan_filter.substr(colon + 1u), nullptr, 0));
+                const pspweb::ScanFilter f = key == "equal" ? pspweb::ScanFilter::Equal
+                                   : key == "not-equal" ? pspweb::ScanFilter::NotEqual
+                                   : key == "unchanged" ? pspweb::ScanFilter::Unchanged
+                                   : key == "increased" ? pspweb::ScanFilter::Increased
+                                   : key == "decreased" ? pspweb::ScanFilter::Decreased
+                                                         : pspweb::ScanFilter::Changed;
+                const pspweb::ScanResult r = g_session.kernel->scanner().filter(f, value);
+                std::cout << "[scan] filter " << key << ": " << r.note << "\n";
+                for (std::size_t i = 0; i < std::min<std::size_t>(r.hits.size(), 8u); ++i)
+                    std::cout << "[scan]   0x" << std::hex << std::uppercase << r.hits[i].address
+                              << " = 0x" << std::setw(8) << std::setfill('0') << r.hits[i].value << std::dec << "\n";
+            }
             // --cheat-probe: report each watched word once per frame so a cheat's
             // effect (or its absence) is visible without a debugger.
             if (!cheat_probes.empty()) {

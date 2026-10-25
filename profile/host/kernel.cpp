@@ -2060,6 +2060,7 @@ void Kernel::return_zero(Ctx &ctx) { finish(ctx, 0u); }
 
 void Kernel::install_cheats() {
     cheats_.set_memory(&rt_.memory());
+    scanner_.set_memory(&rt_.memory());
     // freeze_clock holds the guest's timestamp at the current frame, so countdowns
     // and timers stand still.  It is a *state*, not a one-shot: frame() derives
     // cheat_freeze_clock_ from whether any enabled cheat uses the action, and

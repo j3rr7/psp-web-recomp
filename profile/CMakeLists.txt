@@ -33,7 +33,7 @@ target_include_directories(pspweb_at3 PRIVATE "${PSPWEB_DIR}/third_party/at3_shi
 target_include_directories(pspweb_at3 PUBLIC "${PSPWEB_AT3_DIR}")
 target_compile_options(pspweb_at3 PRIVATE -O2 -w)
 
-add_executable(pspweb host/main.cpp host/kernel.cpp host/devices.cpp host/io.cpp host/modules.cpp host/pgd.cpp host/mpeg.cpp host/sas.cpp host/atrac.cpp host/font.cpp host/savedata.cpp host/cheats.cpp host/ge.cpp host/ge_gl.cpp host/ge_worker.cpp host/webfs.cpp)
+add_executable(pspweb host/main.cpp host/kernel.cpp host/devices.cpp host/io.cpp host/modules.cpp host/pgd.cpp host/mpeg.cpp host/sas.cpp host/atrac.cpp host/font.cpp host/savedata.cpp host/cheats.cpp host/memory_scan.cpp host/ge.cpp host/ge_gl.cpp host/ge_worker.cpp host/webfs.cpp)
 # The table of translated run-time modules, or an empty one.
 if(NOT EXISTS "${PSPWEB_GENERATED_DIR}/modules_table.cpp")
     target_sources(pspweb PRIVATE host/no_modules.cpp)

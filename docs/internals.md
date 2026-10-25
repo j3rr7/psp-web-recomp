@@ -19,8 +19,9 @@ This is the part of the documentation for working on the code: where things live
 | `ge.cpp` | GE display lists, vertex processing and a software rasterizer fallback |
 | `ge_gl.cpp` | The WebGL2 / OpenGL ES 3 backend |
 | `ge_worker.cpp` | Runs the GE on its own thread |
+| `cheats.cpp` | The cheat engine: parses and applies a user cheat file. `memory_scan.cpp` is its other half, the value search behind the **Memory** panel. See [cheats.md](cheats.md). |
 
-`profile/web/shell.html` is the page: status bar, resolution menu, touch controls, fullscreen and the AudioWorklet. Generated code goes to `profile/generated/<game>` and must never be committed.
+`profile/web/shell.html` is the page: status bar, resolution menu, touch controls, fullscreen, the AudioWorklet, and the **Cheats** and **Memory** panels (cheat toggles, and a hex viewer plus value search). Generated code goes to `profile/generated/<game>` and must never be committed.
 
 Cheats (see [cheats.md](cheats.md)) are loaded from a file the user supplies, toggled in the page, and applied at the top of `Kernel::frame` so a poke is visible to the guest code that runs that frame.
 

@@ -109,7 +109,93 @@ address for a game, use the tools described in [internals.md](internals.md):
 
 CWCheat databases for a game are a reasonable starting point, but addresses are
 specific to the exact executable. If a cheat has no effect, the usual cause is
-an address from a different build of the game.
+an address from a different build of the game. See the next section for a more
+reliable way to find an address, and for what a database can and cannot give
+you.
+
+## Finding a cheat in the browser
+
+You do not need a debugger or the native runner to find an address: the
+**Memory** button opens an inspector and a value search that run inside the page,
+against the game as it plays.
+
+### The panel
+
+**Memory** opens a panel with two halves:
+
+- **Hex viewer** — 256 bytes starting at an address. Type an address and press
+  **Go**, or use **-256** / **+256** to walk. The right column is printable
+  ASCII, which is how you spot a name or a string (a character name, a level
+  label) and work outwards from it. **Poke 32-bit** writes one value at the
+  current address, once, as a quick way to test a guess; it is not saved.
+- **Search** — the value finder described below.
+
+Addresses are the **guest's**, the same ones a cheat file uses: main RAM starts
+at `0x08800000` and runs to `0x0A000000`.
+
+### The search
+
+This is the standard emulator workflow. A value you can see on screen — health,
+ammo, money, lives — is compared against memory until one address is left:
+
+1. Pick the **width** (8-, 16- or 32-bit; if you are unsure, 32-bit is the usual
+   choice for a counter) and type the value you can see. **First scan** lists
+   every address holding it. A number like health usually splits into a few
+   thousand candidates.
+2. Go back to the game and change the value — take a hit, spend a bullet.
+3. Press **Changed** (or **Decreased** / **Increased** if you know the
+direction). The list keeps only the addresses whose value moved.
+4. Repeat 2–3 a few times. The list shrinks to a handful, then to one.
+
+**Unknown** starts from *every* address instead of a known value, for when you
+cannot see the number (a hidden stat, a flag). You must then filter with
+**Changed** / **Unchanged** rather than a value, since you never had one to
+compare against. **Refresh** re-reads the current value at each candidate
+without narrowing the list, so you can watch a value move. **Reset** clears the
+search.
+
+### Turning a result into a cheat
+
+Click **+ cheat** on any candidate. The page downloads a small `.cheat` file
+containing a `cheat` block with that address and its value at the current width
+— open it from the **Cheats** panel to load it. Adjust it by hand if needed: a
+plain poke re-writes the value every frame (what most cheats need), so edit the
+value to the one you want to *hold* rather than the one you found. See the file
+format above.
+
+### Testing a found address without the browser
+
+Once you have a candidate, the native runner can confirm it. `--scan
+WIDTH:VALUE` runs a first scan on the given frame and `--scan-filter
+SPEC[:VALUE]` filters later (`changed`, `unchanged`, `increased`, `decreased`,
+`equal`, `not-equal`); both print the top candidates, which is often enough to
+recognise the address you found by hand:
+
+```bash
+# First scan for 100 (32-bit) at frame 60; keep what changed by frame 120.
+build/native-<game>/profiles/web/pspweb_<game> games/<game>/root/EBOOT.BIN \
+    --disc games/<game>/root/disc --frames 140 \
+    --scan 4:100 --scan-at 60 --scan-filter changed
+```
+
+### About existing cheat databases
+
+A CWCheat or PPSSPP database is worth reading for ideas, but it is **not** a
+drop-in for this emulator, and the reason is worth understanding:
+
+- A cheat is a bare **address**, with no symbol. It only works if the address is
+  the same in the running game.
+- **Code addresses** (jokers and hooks) match only when the game is the exact
+  same executable — same region, same version, same build. A different release
+  moves them.
+- **Data addresses** in the module's own image have a fair chance of matching.
+  Addresses on the **heap** (most counters) depend on the game allocating in
+  exactly the same order as when the cheat was written, which it may not do here.
+
+So treat a database as a list of candidates to *try*, and re-find anything that
+comes out wrong. A wrong address does not fail loudly — the write lands
+somewhere harmless, or rarely somewhere harmful. This is exactly why the search
+panel exists: it finds the address for *your* copy of the game.
 
 ## Testing a cheat with the headless runner
 
