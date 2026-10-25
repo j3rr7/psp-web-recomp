@@ -1536,8 +1536,16 @@ std::int32_t Kernel::start_handler(std::uint32_t entry, std::uint32_t gp, std::u
     t.priority = 1;
     t.stack_size = 0x4000u;
     t.stack_block = allocate("stack:interrupt", 1u, t.stack_size, 0u);
-    if (t.stack_block < 0) return 0;
-    t.stack_top = blocks_.at(t.stack_block).address + t.stack_size;
+    if (t.stack_block < 0) {
+        t.stack_size = 0x1000u;
+        t.stack_block = allocate("stack:interrupt", 1u, t.stack_size, 0u);
+    }
+    if (t.stack_block >= 0) {
+        t.stack_top = blocks_.at(t.stack_block).address + t.stack_size;
+    } else {
+        t.stack_size = 0x3C00u;
+        t.stack_top = kUserPartitionStart + 0x4000u;
+    }
     t.gp = gp;
     const std::int32_t uid = t.uid;
     auto &stored = threads_[uid] = std::move(t);
@@ -1850,20 +1858,36 @@ void Kernel::sceGeUnsetCallback(Ctx &ctx) {
 }
 
 void Kernel::run_ge_callbacks() {
-    std::vector<GeEvent> events;
-    {
-        const std::lock_guard<std::mutex> lock(ge_events_mutex_);
-        ge_event_pending_.store(false, std::memory_order_relaxed);
-        if (ge_events_.empty()) return;
-        events.swap(ge_events_);
-    }
-    for (const GeEvent &event : events) {
+    if (ge_callback_running_ != 0 && threads_.contains(ge_callback_running_)) return;
+    ge_callback_running_ = 0;
+    while (true) {
+        GeEvent event{};
+        {
+            const std::lock_guard<std::mutex> lock(ge_events_mutex_);
+            if (ge_events_.empty()) {
+                ge_event_pending_.store(false, std::memory_order_relaxed);
+                return;
+            }
+            event = ge_events_.front();
+            ge_events_.pop_front();
+            ge_event_pending_.store(!ge_events_.empty(), std::memory_order_relaxed);
+        }
         const auto it = ge_callbacks_.find(event.callback);
         if (it == ge_callbacks_.end()) continue;
         const GeCallback &callback = it->second;
         const std::uint32_t entry = event.finish ? callback.finish : callback.signal;
-        if (entry != 0u)
-            start_handler(entry, callback.gp, event.value, event.finish ? callback.finish_arg : callback.signal_arg, nullptr);
+        if (entry == 0u) continue;
+        const std::int32_t uid = start_handler(
+            entry, callback.gp, event.value, event.finish ? callback.finish_arg : callback.signal_arg,
+            [this](std::uint32_t status) {
+                ge_callback_running_ = 0;
+                run_ge_callbacks();
+                return status;
+            });
+        if (uid != 0) {
+            ge_callback_running_ = uid;
+            return;
+        }
     }
 }
 

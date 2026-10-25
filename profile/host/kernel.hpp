@@ -574,7 +574,8 @@ private:
     std::map<std::int32_t, Alarm> alarms_;
     std::map<std::int32_t, GeCallback> ge_callbacks_;
     std::mutex ge_events_mutex_;
-    std::vector<GeEvent> ge_events_;
+    std::deque<GeEvent> ge_events_;
+    std::int32_t ge_callback_running_{0};
     std::atomic<bool> ge_event_pending_{false};
     struct GuestCall {
         std::int32_t caller{};
