@@ -13,6 +13,7 @@ This is the part of the documentation for working on the code: where things live
 | `devices.cpp` | Controller, audio channels and mixing, UMD, utility dialogs, misc kernel queries |
 | `io.cpp`, `webfs.cpp` | File system; the disc is streamed over HTTP Range requests in the browser |
 | `pgd.cpp` | Decrypts PGD (DRM) files that games set up with `sceIoIoctl` |
+| `cheats.cpp` | The cheat engine: parses a user cheat file and applies it once per frame |
 | `mpeg.cpp` | The movie player's ring buffer and stream bookkeeping (no decoding yet) |
 | `sas.cpp`, `atrac.cpp` | Sound effect voices and ATRAC3+ music and speech |
 | `ge.cpp` | GE display lists, vertex processing and a software rasterizer fallback |
@@ -20,6 +21,8 @@ This is the part of the documentation for working on the code: where things live
 | `ge_worker.cpp` | Runs the GE on its own thread |
 
 `profile/web/shell.html` is the page: status bar, resolution menu, touch controls, fullscreen and the AudioWorklet. Generated code goes to `profile/generated/<game>` and must never be committed.
+
+Cheats (see [cheats.md](cheats.md)) are loaded from a file the user supplies, toggled in the page, and applied at the top of `Kernel::frame` so a poke is visible to the guest code that runs that frame.
 
 The scripts each do one step, and `scripts/port.sh` chains them:
 

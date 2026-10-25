@@ -1,5 +1,7 @@
 #include "kernel.hpp"
 
+#include "cheats.hpp"
+
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #endif
@@ -403,6 +405,7 @@ void Kernel::install(const std::vector<psprecomp::PspImport> &imports) {
     install_atrac();
     install_fonts();
     install_savedata();
+    install_cheats();
     for (const auto &import : imports) install_fallback(import);
 }
 
@@ -691,6 +694,19 @@ bool Kernel::frame(double budget_ms) {
     frame_start_guest_us_ = std::max(static_cast<std::uint64_t>(display_.vcount) * kFrameUs, prev_now_us);
     frame_real_start_ns_ = real_now_ns();
     warp_us_ = 0u;
+    // Apply cheats at the very top of the frame, before any guest thread runs, so
+    // a poke is visible to the code that executes this frame.  freeze_clock is a
+    // state: it is cleared here and re-requested by the action while it is on, so
+    // disabling the cheat releases the clock on the next frame.  The held value is
+    // captured on the frame the freeze begins and stays put while it lasts.
+    if (cheats_.any_enabled()) {
+        const bool was_frozen = cheat_freeze_clock_;
+        cheat_freeze_clock_ = false;
+        cheats_.apply_frame();
+        if (cheat_freeze_clock_ && !was_frozen) cheat_frozen_us_ = frame_start_guest_us_;
+    } else {
+        cheat_freeze_clock_ = false;
+    }
     for (auto &[uid, t] : threads_) {
         (void)uid;
         if (t.state == ThreadState::Waiting && t.wait == WaitType::Vblank) wake(t, 0u);
@@ -1152,8 +1168,12 @@ void Kernel::sceUmdRegisterUMDCallBack(Ctx &ctx) {
     finish(ctx, 0u);
 }
 
-void Kernel::sceKernelGetSystemTimeLow(Ctx &ctx) { finish(ctx, static_cast<std::uint32_t>(now_us())); }
-void Kernel::sceKernelGetSystemTimeWide(Ctx &ctx) { finish64(ctx, now_us()); }
+void Kernel::sceKernelGetSystemTimeLow(Ctx &ctx) {
+    finish(ctx, static_cast<std::uint32_t>(cheat_freeze_clock_ ? cheat_frozen_us_ : now_us()));
+}
+void Kernel::sceKernelGetSystemTimeWide(Ctx &ctx) {
+    finish64(ctx, cheat_freeze_clock_ ? cheat_frozen_us_ : now_us());
+}
 
 void Kernel::sceKernelGetSystemTime(Ctx &ctx) {
     const std::uint64_t now = now_us();
@@ -2034,5 +2054,34 @@ void Kernel::sceKernelMemset(Ctx &ctx) {
 
 void Kernel::sceKernelCpuSuspendIntr(Ctx &ctx) { finish(ctx, 1u); }
 void Kernel::return_zero(Ctx &ctx) { finish(ctx, 0u); }
+
+// ---------------------------------------------------------------------------
+// Cheats (see cheats.hpp and docs/cheats.md).
+
+void Kernel::install_cheats() {
+    cheats_.set_memory(&rt_.memory());
+    // freeze_clock holds the guest's timestamp at the current frame, so countdowns
+    // and timers stand still.  It is a *state*, not a one-shot: frame() derives
+    // cheat_freeze_clock_ from whether any enabled cheat uses the action, and
+    // captures the base value the first frame it is armed.  The callback itself
+    // only records the request; it has no effect on its own.
+    cheats_.register_action("freeze_clock", [this](const CheatEntry &) { cheat_freeze_clock_ = true; });
+}
+
+CheatLoadResult Kernel::load_cheats(const std::string &text) {
+    CheatLoadResult parsed = parse_cheats(text);
+    // A cheat that names an unknown host action can never do anything; report it
+    // rather than let it sit in the list looking active.
+    for (auto &cheat : parsed.cheats) {
+        for (auto &entry : cheat.entries) {
+            if (!entry.action.empty() && !cheats_.has_action(entry.action))
+                parsed.errors.push_back("cheat " + cheat.id + ": unknown host action '" + entry.action + "'");
+        }
+    }
+    cheats_.set_memory(&rt_.memory());
+    cheats_.set_cheats(std::move(parsed));
+    // Return what the engine now holds (set_cheats preserves existing toggles).
+    return CheatLoadResult{cheats_.cheats(), cheats_.errors()};
+}
 
 } // namespace pspweb

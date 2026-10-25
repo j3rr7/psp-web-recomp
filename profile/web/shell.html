@@ -159,6 +159,12 @@
   .saves-actions button { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 6px 14px; }
   .saves-actions button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   .saves-hint { color: var(--muted); font-size: 12px; padding: 0 16px 12px; text-align: right; }
+  .cheats-errors { color: #ff9f9f; font: 12px/1.4 ui-monospace, monospace; padding: 8px 16px; border-top: 1px solid var(--border); max-height: 120px; overflow-y: auto; white-space: pre-wrap; }
+  .cheat-row { display: flex; gap: 10px; align-items: center; padding: 10px 8px; border-radius: 8px; cursor: pointer; border: 2px solid transparent; }
+  .cheat-row.sel { border-color: var(--accent); background: var(--ctl); }
+  .cheat-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cheat-state { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+  .cheat-row.on .cheat-state { color: var(--accent); font-weight: 600; }
   body.immersive #export-saves, body.immersive #import-saves, body.immersive #note { display: none; }
 </style>
 </head>
@@ -182,6 +188,8 @@
       <button id="export-saves" type="button" title="Download your saves as a ZIP file">Export saves</button>
       <button id="import-saves" type="button" title="Add saves from a ZIP file">Import saves</button>
       <input id="import-file" type="file" accept=".zip,application/zip" hidden>
+      <button id="cheats" type="button" title="Load a cheat file and toggle cheats">Cheats</button>
+      <input id="cheat-file" type="file" accept=".cheat,.txt,text/plain" hidden>
       <button id="download-log" type="button" title="Download the full console log as a text file">Download log</button>
       <button id="pause" type="button" title="Pause or resume the guest (state is dumped to the log)">Pause</button>
       <button id="sound" type="button">Mute</button>
@@ -198,6 +206,19 @@
         <button id="saves-ok" type="button" class="primary"></button>
       </div>
       <div class="saves-hint">Arrows to choose, Enter or ✕ to confirm, Esc or ○ to cancel</div>
+    </div>
+  </div>
+  <div id="cheats-panel" class="saves" hidden role="dialog" aria-modal="true" aria-labelledby="cheats-title">
+    <div class="saves-panel">
+      <div id="cheats-title" class="saves-title">Cheats</div>
+      <ul id="cheats-list" class="saves-list"></ul>
+      <div id="cheats-errors" class="cheats-errors" hidden></div>
+      <div class="saves-actions">
+        <button id="cheats-load" type="button">Load file…</button>
+        <button id="cheats-toggle-all" type="button">Enable all</button>
+        <button id="cheats-close" type="button" class="primary">Close</button>
+      </div>
+      <div class="saves-hint">Cheat files are CWCheat-style text; see docs/cheats.md</div>
     </div>
   </div>
   <div id="touch" class="controls" aria-hidden="true">
@@ -669,6 +690,93 @@
     }, 300);
   }
   Module.pspSavesChanged = storeSaves;
+
+  // Cheats.  The engine reports the loaded list as JSON; the panel renders it and
+  // calls back to toggle.  Files are loaded from disk only (nothing ships with
+  // the page), matching how disc images are handled.  See docs/cheats.md.
+  var cheatsState = { list: [], errors: [] };
+  var cheatsEl = document.getElementById('cheats-panel'), cheatsList = document.getElementById('cheats-list');
+  var cheatsErrors = document.getElementById('cheats-errors');
+  Module.pspCheats = function (json) {
+    try { cheatsState = JSON.parse(json) || cheatsState; } catch (e) { console.warn('cheats: bad payload', e); return; }
+    cheatsState.list = cheatsState.list || [];
+    cheatsState.errors = cheatsState.errors || [];
+    renderCheats();
+  };
+  function renderCheats() {
+    if (!cheatsList) return;
+    cheatsList.textContent = '';
+    cheatsState.list.forEach(function (cheat) {
+      var li = document.createElement('li');
+      li.className = 'cheat-row' + (cheat.enabled ? ' on' : '');
+      var name = document.createElement('span');
+      name.className = 'cheat-name';
+      name.textContent = cheat.name || cheat.id;
+      var state = document.createElement('span');
+      state.className = 'cheat-state';
+      state.textContent = cheat.enabled ? 'ON' : 'off';
+      li.appendChild(name);
+      li.appendChild(state);
+      li.addEventListener('click', function () {
+        if (Module._pspweb_set_cheat) Module._pspweb_set_cheat(cheat.id, cheat.enabled ? 0 : 1);
+      });
+      li.title = cheat.id;
+      cheatsList.appendChild(li);
+    });
+    if (!cheatsState.list.length) {
+      var empty = document.createElement('li');
+      empty.className = 'cheat-name';
+      empty.style.padding = '10px 8px';
+      empty.textContent = 'No cheats loaded. Use "Load file…" to open a .cheat file.';
+      cheatsList.appendChild(empty);
+    }
+    var anyOn = cheatsState.list.some(function (c) { return c.enabled; });
+    var toggleAll = document.getElementById('cheats-toggle-all');
+    if (toggleAll) toggleAll.textContent = anyOn ? 'Disable all' : 'Enable all';
+    if (cheatsState.errors.length) {
+      cheatsErrors.hidden = false;
+      cheatsErrors.textContent = cheatsState.errors.join('\n');
+    } else {
+      cheatsErrors.hidden = true;
+      cheatsErrors.textContent = '';
+    }
+  }
+  function openCheats() {
+    cheatsEl.hidden = false;
+    if (Module._pspweb_cheats_ping) Module._pspweb_cheats_ping();
+  }
+  function closeCheats() { cheatsEl.hidden = true; }
+  (function () {
+    var button = document.getElementById('cheats');
+    var fileInput = document.getElementById('cheat-file');
+    if (button) button.addEventListener('click', function () { if (cheatsEl.hidden) openCheats(); else closeCheats(); });
+    var closeButton = document.getElementById('cheats-close');
+    if (closeButton) closeButton.addEventListener('click', closeCheats);
+    var loadButton = document.getElementById('cheats-load');
+    if (loadButton) loadButton.addEventListener('click', function () { fileInput.click(); });
+    var toggleAll = document.getElementById('cheats-toggle-all');
+    if (toggleAll) toggleAll.addEventListener('click', function () {
+      var anyOn = cheatsState.list.some(function (c) { return c.enabled; });
+      if (Module._pspweb_set_cheat) Module._pspweb_set_cheat('', anyOn ? 0 : 1);
+    });
+    fileInput.addEventListener('change', function () {
+      var file = fileInput.files && fileInput.files[0];
+      fileInput.value = '';
+      if (!file) return;
+      var reader = new FileReader();
+      reader.onload = function () {
+        // Module._pspweb_load_cheats takes a C string allocated in the wasm heap.
+        var text = String(reader.result);
+        var len = lengthBytesUTF8(text) + 1;
+        var ptr = Module._malloc(len);
+        stringToUTF8(text, ptr, len);
+        var count = Module._pspweb_load_cheats(ptr);
+        Module._free(ptr);
+        note(count ? 'Cheats loaded' : 'No cheats parsed (see the panel)');
+      };
+      reader.readAsText(file);
+    });
+  })();
 
   var savesEl = document.getElementById('saves'), savesList = document.getElementById('saves-list');
   var savesTitle = document.getElementById('saves-title'), savesOk = document.getElementById('saves-ok');

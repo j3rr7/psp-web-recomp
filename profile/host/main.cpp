@@ -304,6 +304,81 @@ extern "C" EMSCRIPTEN_KEEPALIVE void pspweb_save_choice(int index) {
     if (g_session.kernel) g_session.kernel->savedata_choose(index);
 }
 
+// Cheat bridge.  The page loads a file's text, toggles cheats by id, and reads
+// back the current list as JSON through Module.pspCheats.  See docs/cheats.md.
+namespace {
+// Escapes the few characters that matter for a JSON string value.
+std::string json_escape(const std::string &text) {
+    std::string out;
+    out.reserve(text.size() + 2u);
+    for (char c : text) {
+        switch (c) {
+        case '"': out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default:
+            if (static_cast<unsigned char>(c) < 0x20u) {
+                char buf[8];
+                std::snprintf(buf, sizeof buf, "\\u%04x", static_cast<unsigned char>(c));
+                out += buf;
+            } else {
+                out += c;
+            }
+        }
+    }
+    return out;
+}
+
+// Reports the loaded cheats and any errors to the page.
+void report_cheats() {
+    if (!g_session.kernel) return;
+    const auto &cheats = g_session.kernel->cheats();
+    std::string out = "{\"cheats\":[";
+    bool first = true;
+    for (const auto &cheat : cheats.cheats()) {
+        if (!first) out += ',';
+        first = false;
+        out += "{\"id\":\"" + json_escape(cheat.id) + "\",\"name\":\"" + json_escape(cheat.name) +
+               "\",\"enabled\":" + (cheat.enabled ? "true" : "false") + "}";
+    }
+    out += "],\"errors\":[";
+    first = true;
+    for (const auto &error : cheats.errors()) {
+        if (!first) out += ',';
+        first = false;
+        out += '"' + json_escape(error) + '"';
+    }
+    out += "]}";
+    EM_ASM({ if (Module.pspCheats) Module.pspCheats(UTF8ToString($0)); }, out.c_str());
+}
+} // namespace
+
+// Loads cheat text (the contents of a .cheat file).  Returns 1 when at least one
+// cheat parsed, 0 otherwise; either way the page is told the full result.
+extern "C" EMSCRIPTEN_KEEPALIVE int pspweb_load_cheats(const char *text) {
+    if (!g_session.kernel || text == nullptr) return 0;
+    const auto result = g_session.kernel->load_cheats(text);
+    for (const auto &error : result.errors) std::cerr << "[cheat] " << error << "\n";
+    std::cout << "[cheat] loaded " << result.cheats.size() << " cheats\n";
+    report_cheats();
+    return result.cheats.empty() ? 0 : 1;
+}
+
+// Enables or disables one cheat by id.  An empty id toggles every cheat.
+extern "C" EMSCRIPTEN_KEEPALIVE void pspweb_set_cheat(const char *id, int enabled) {
+    if (!g_session.kernel) return;
+    const std::string key = id != nullptr ? id : "";
+    if (key.empty()) g_session.kernel->cheats().set_all_enabled(enabled != 0);
+    else if (!g_session.kernel->cheats().set_enabled(key, enabled != 0))
+        std::cerr << "[cheat] no cheat with id " << key << "\n";
+    report_cheats();
+}
+
+// Re-reports the loaded cheats (the page calls this when it opens the panel).
+extern "C" EMSCRIPTEN_KEEPALIVE void pspweb_cheats_ping() { report_cheats(); }
+
 namespace {
 // Creates the WebGL2 context on the calling thread (the GE thread when there
 // is one: the canvas has been handed to it) and the GL renderer.
@@ -443,6 +518,9 @@ int main(int argc, char **argv) {
     std::string disc = ".", memstick = ".", dump = "frame.ppm", wav;
     int frames = 600, dump_every = 0;
     std::string manifest;
+    std::string cheat_file;   // --cheat: load a cheat file before running
+    std::vector<std::string> cheat_enable;  // --cheat-enable ID (repeatable)
+    std::vector<std::uint32_t> cheat_probes;  // --cheat-probe ADDR (repeatable)
     bool use_gl = false, threads = true;
     struct Press { int frame, length; std::uint32_t buttons; };
     std::vector<Press> presses; // --press frame:buttons_hex:length
@@ -456,6 +534,9 @@ int main(int argc, char **argv) {
         else if (flag == "--dump") dump = argv[i + 1];
         else if (flag == "--dump-every") dump_every = std::stoi(argv[i + 1]);
         else if (flag == "--webfs") manifest = argv[i + 1];
+        else if (flag == "--cheat") cheat_file = argv[i + 1];
+        else if (flag == "--cheat-enable") cheat_enable.push_back(argv[i + 1]);
+        else if (flag == "--cheat-probe") cheat_probes.push_back(static_cast<std::uint32_t>(std::stoul(argv[i + 1], nullptr, 0)));
         else if (flag == "--gl") use_gl = std::string(argv[i + 1]) != "0";
         else if (flag == "--scale") g_session.scale.store(std::stoi(argv[i + 1]));
         else if (flag == "--threads") threads = std::string(argv[i + 1]) != "0";
@@ -474,6 +555,28 @@ int main(int argc, char **argv) {
     }
     try {
         if (!start_session(argv[1], disc, memstick, PSPWEB_GUEST_PATH, manifest, disc)) return 1;
+        if (!cheat_file.empty()) {
+            std::ifstream in(cheat_file, std::ios::binary);
+            if (!in) {
+                std::cerr << "[cheat] cannot open " << cheat_file << "\n";
+            } else {
+                const std::string text{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+                const auto result = g_session.kernel->load_cheats(text);
+                std::cout << "[cheat] loaded " << result.cheats.size() << " cheats from " << cheat_file << "\n";
+                for (const auto &error : result.errors) std::cerr << "[cheat] " << error << "\n";
+                // Enable the requested ids (or all of them when none were named).
+                if (cheat_enable.empty()) {
+                    g_session.kernel->cheats().set_all_enabled(true);
+                } else {
+                    for (const auto &id : cheat_enable) {
+                        if (!g_session.kernel->cheats().set_enabled(id, true))
+                            std::cerr << "[cheat] no cheat with id " << id << "\n";
+                    }
+                }
+                for (const auto &cheat : g_session.kernel->cheats().cheats())
+                    std::cout << "[cheat] " << (cheat.enabled ? "ON  " : "off ") << cheat.id << " \"" << cheat.name << "\"\n";
+            }
+        }
         if (!wav.empty()) g_session.kernel->set_audio_sink(&wav_sink);
         if (use_gl) {
             g_session.use_gl = true;
@@ -514,6 +617,16 @@ int main(int argc, char **argv) {
             if (!step(50.0)) break;
             ++frame;
             progress.store(frame);
+            // --cheat-probe: report each watched word once per frame so a cheat's
+            // effect (or its absence) is visible without a debugger.
+            if (!cheat_probes.empty()) {
+                std::cout << "[cheat-probe frame " << frame << "]";
+                for (std::uint32_t addr : cheat_probes)
+                    std::cout << " 0x" << std::hex << std::uppercase << addr << "=0x"
+                              << std::setw(8) << std::setfill('0')
+                              << g_session.runtime->memory().load32(addr) << std::dec;
+                std::cout << "\n";
+            }
             const auto &ge = g_session.kernel->ge().stats();
             if (frame % 60 == 0) {
                 std::cout << "[frame " << frame << "] fb=0x" << std::hex << g_session.kernel->display().framebuffer
