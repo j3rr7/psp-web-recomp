@@ -231,15 +231,43 @@ that cheat; with no `--cheat-enable`, every cheat in the file is enabled.
 - **Legally.** Cheat files are yours to supply. Do not commit them here, and do
   not redistribute a game's own data. See the Legal section of the README.
 
-## Deferred: code-level cheats
+## Deferred: code-level cheats (WIP)
 
-Cheats that need to intercept the game's code rather than its memory (setting a
-breakpoint on an address and rewriting a register, or replacing a routine
-outright through `Runtime::register_native_fast_path`) are **not implemented**.
+Memory cheats cover most of what a database lists. The rest is *code-level*:
+setting a breakpoint on an address and rewriting a register, or replacing a
+routine outright (a native fast path). **None of that is implemented**; this
+section records the design and the traps so it is not started twice.
 
-When this is built, note the trap: hot leaf routines are reached through the
-runtime's cross-unit call chaining and never hit the outer dispatch hooks, so a
-breakpoint layer must arm **both** the outer hooks
-(`set_runtime_pre_dispatch_hook`) and the chained-call hooks
-(`set_runtime_pre_chained_call_hook`) or it will silently miss exactly the
-addresses it most wants. This is why it is parked rather than done quickly.
+**Why it is not just "poke an address".** A memory poke only has to land at the
+right place at the right time. A code cheat has to intercept execution, which
+means hooking the dispatch the recompiler actually uses.
+
+**The hook surface.** The runtime exposes outer hooks around each dispatch —
+`set_runtime_pre_dispatch_hook` and `set_runtime_post_dispatch_hook` — plus a
+chained-call pair, `set_runtime_pre_chained_call_hook` and
+`set_runtime_post_chained_call_hook`. A breakpoint layer must arm **both pairs**.
+Hot leaf routines are reached through the runtime's cross-unit call chaining and
+never hit the outer hooks, so a layer that only hooks the outer dispatch will
+silently miss exactly the addresses it most wants. Note also that the chained
+hooks are compiled out under `PSPRECOMP_AOT_PRODUCTION_FASTPATHS` — the fast
+build the browser uses (`runtime.cpp`, the `#if !defined(...)` guards around the
+chained hooks) — so code cheats would need a different, production-safe hook.
+
+**Native routine replacement.** `Runtime::register_native_fast_path` can stand in
+for a guest routine. That is the cheapest way to express "make this function do
+something else", but it is a per-symbol decision made at registration time, not
+a per-frame poke, so it does not fit the cheat-file model that toggles a line on
+and off while the game is already running.
+
+**What has to exist first.**
+
+- A production-safe intercept point (not the fast-path-compiled-out hooks).
+- A register-write grammar for a breakpoint cheat (which register, which value,
+  and when) — CWCheat's `_C`/`_L` codes are a reference for the shape.
+- A way to arm and disarm over the same toggling the panel already drives.
+
+**How it would be validated.** The headless runner can already hold buttons and
+sample values (`--press`, `--cheat-probe`), so a breakpoint cheat can be checked
+by watching a register-derived value rather than by eye. Until then, anything a
+database lists as a code hook has to be re-found as a memory address, which is
+what the search panel is for.
