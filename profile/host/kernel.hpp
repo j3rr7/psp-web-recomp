@@ -295,6 +295,7 @@ private:
     void start_thread(Thread &t, std::uint32_t arglen, const std::vector<std::uint8_t> &args);
     [[nodiscard]] std::uint64_t earliest_timed_wake() const;
     [[nodiscard]] bool waiting_for_ge() const;
+    [[nodiscard]] bool waiting_for_io() const;
 
     void hle(const char *library, std::uint32_t nid, const char *name,
              void (Kernel::*handler)(Ctx &));

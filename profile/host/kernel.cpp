@@ -146,8 +146,7 @@ void Kernel::set_roots(std::filesystem::path disc_root, std::filesystem::path me
 std::uint64_t Kernel::now_us() const {
     const std::int64_t elapsed_ns = real_now_ns() - frame_real_start_ns_;
     const std::uint64_t elapsed_us = elapsed_ns > 0 ? static_cast<std::uint64_t>(elapsed_ns / 1000) : 0u;
-    const std::uint64_t now = frame_start_guest_us_ + elapsed_us + warp_us_;
-    return std::min(now, frame_start_guest_us_ + kFrameUs - 1u);
+    return frame_start_guest_us_ + elapsed_us + warp_us_;
 }
 
 void Kernel::finish(Ctx &ctx, std::uint32_t result) {
@@ -536,6 +535,14 @@ bool Kernel::waiting_for_ge() const {
     return false;
 }
 
+bool Kernel::waiting_for_io() const {
+    for (const auto &[uid, t] : threads_) {
+        (void)uid;
+        if (t.state == ThreadState::Waiting && t.wait == WaitType::Io) return true;
+    }
+    return false;
+}
+
 std::uint64_t Kernel::earliest_timed_wake() const {
     std::uint64_t earliest = 0u;
     for (const auto &[uid, t] : threads_) {
@@ -677,10 +684,11 @@ void Kernel::boot(std::uint32_t entry, std::uint32_t gp, const std::string &modu
 
 bool Kernel::frame(double budget_ms) {
     if (halted_) return false;
+    const std::uint64_t prev_now_us = display_.vcount > 1u ? now_us() : 0u;
     poll_io();
     ++display_.vcount;
     ge_worker_->post([ge = ge_.get()] { ge->next_frame(); });
-    frame_start_guest_us_ = static_cast<std::uint64_t>(display_.vcount) * kFrameUs;
+    frame_start_guest_us_ = std::max(static_cast<std::uint64_t>(display_.vcount) * kFrameUs, prev_now_us);
     frame_real_start_ns_ = real_now_ns();
     warp_us_ = 0u;
     for (auto &[uid, t] : threads_) {
@@ -723,13 +731,21 @@ bool Kernel::frame(double budget_ms) {
                 continue;
             }
             if (next == nullptr) {
-                const std::uint64_t wake_at = earliest_timed_wake();
-                const std::uint64_t now = now_us();
-                if (wake_at != 0u && wake_at < frame_start_guest_us_ + kFrameUs - 1u) {
-                    if (wake_at > now) warp_us_ += wake_at - now;
-                    continue;
+                if (waiting_for_io()) {
+                    poll_io();
+                    next = pick_ready();
+                    if (next == nullptr) break;
+                } else {
+                    const std::uint64_t wake_at = earliest_timed_wake();
+                    const std::uint64_t now = now_us();
+                    const std::uint64_t frame_end_us =
+                        std::max(frame_start_guest_us_, static_cast<std::uint64_t>(display_.vcount) * kFrameUs) + kFrameUs - 1u;
+                    if (wake_at != 0u && wake_at < frame_end_us) {
+                        if (wake_at > now) warp_us_ += wake_at - now;
+                        continue;
+                    }
+                    break;
                 }
-                break;
             }
             load_thread(*next);
         }

@@ -242,14 +242,27 @@
   // a much larger cap.
   var LOG_MAX_LINES = 200000;
   var logLines = [];
-  function appendLog(text) {
-    logEl.textContent += text + '\n';
+  var pendingLogText = '';
+  var logFlushScheduled = false;
+  function flushLog() {
+    logFlushScheduled = false;
+    if (!pendingLogText) return;
+    logEl.textContent += pendingLogText;
+    pendingLogText = '';
     if (logEl.textContent.length > 200000) logEl.textContent = logEl.textContent.slice(-150000);
     logEl.scrollTop = logEl.scrollHeight;
+  }
+  function appendLog(text) {
     // printErr may provide a multi-line string; keep each line separate.
     var parts = String(text).split('\n');
     for (var i = 0; i < parts.length; i++) logLines.push(parts[i]);
     if (logLines.length > LOG_MAX_LINES) logLines.splice(0, logLines.length - LOG_MAX_LINES);
+    pendingLogText += text + '\n';
+    if (pendingLogText.length > 200000) pendingLogText = pendingLogText.slice(-150000);
+    if (!logFlushScheduled) {
+      logFlushScheduled = true;
+      requestAnimationFrame(flushLog);
+    }
   }
   // Snapshot of page/emulator state placed at the top of a downloaded log so a
   // report can be understood without the reporter explaining the setup.
