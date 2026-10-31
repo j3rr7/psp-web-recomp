@@ -423,8 +423,14 @@
     // ?profile: per-frame timing breakdown in the log (see README).
     // ?trace=io,hle,all: enable the guest I/O and HLE call traces, which the
     // page's log pane then shows (PSPWEB_TRACE_IO / PSPWEB_TRACE_HLE).
+    // ?lang=fr (en, de, es, it, ja, ... or 0-11): PSP system language, for
+    // discs that only ship some languages (PSPWEB_LANGUAGE).
     preRun: [mountSaves,
       function () { if (/[?&]profile\b/.test(location.search)) ENV.PSPWEB_FRAME_PROFILE = '1'; },
+      function () {
+        var m = location.search.match(/[?&]lang=([^&]+)/);
+        if (m) ENV.PSPWEB_LANGUAGE = decodeURIComponent(m[1]);
+      },
       function () {
         var m = location.search.match(/[?&]trace=([^&]+)/);
         if (!m) return;

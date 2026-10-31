@@ -240,6 +240,14 @@ public:
     // Host directories that disc0:/umd0: and ms0: resolve to.
     void set_roots(std::filesystem::path disc_root, std::filesystem::path memstick_root);
     void set_flash_root(std::filesystem::path flash_root) { flash_root_ = std::move(flash_root); }
+    // PSP system language reported to the game (PSP_SYSTEMPARAM_LANGUAGE_*:
+    // 0 Japanese, 1 English, 2 French, 3 Spanish, 4 German, 5 Italian, 6 Dutch,
+    // 7 Portuguese, 8 Russian, 9 Korean, 10/11 Chinese).  Games pick their
+    // voice/text folders from it, so it must match a language the disc ships.
+    void set_language(std::uint32_t language) { language_ = language; }
+    [[nodiscard]] std::uint32_t language() const noexcept { return language_; }
+    // Parses "fr", "french", "2", ... into a language id; false if unknown.
+    static bool parse_language(const std::string &text, std::uint32_t &language);
     // Marks a guest range (the loaded module image) as allocated.
     void reserve(std::uint32_t address, std::uint32_t size, std::string name);
     // Registers HLE handlers, logging fallbacks for every other import, and the
@@ -259,9 +267,6 @@ public:
     [[nodiscard]] bool halted() const noexcept { return halted_; }
     [[nodiscard]] const std::string &halt_reason() const noexcept { return halt_reason_; }
     [[nodiscard]] std::uint64_t now_us() const;
-    // Diagnostic only (native:report_clock): the idle-warp accumulator, so the
-    // drift between the guest clock and the nominal frame timeline is visible.
-    [[nodiscard]] std::uint64_t warp_us_for_diag() const noexcept { return warp_us_; }
     [[nodiscard]] Ge &ge() noexcept { return *ge_; }
     // Runs display lists (on a GE thread once started) and other GE-side work.
     [[nodiscard]] GeWorker &ge_worker() noexcept { return *ge_worker_; }
@@ -641,7 +646,9 @@ private:
     std::uint64_t ready_sequence_{};
     // Guest time is frame-based: each host frame is one vblank period, real
     // time advances it within the frame, and an idle guest warps forward to its
-    // next timer instead of stalling the browser.
+    // next timer instead of stalling the browser.  warp_us_ is the offset into
+    // the current frame the warp has reached (never past its end); now_us()
+    // takes the larger of it and real elapsed time, never their sum.
     std::uint64_t frame_start_guest_us_{};
     std::uint64_t warp_us_{};
     std::int64_t frame_real_start_ns_{};
@@ -650,6 +657,7 @@ private:
     std::filesystem::path disc_root_{"."};
     std::filesystem::path memstick_root_{"."};
     std::filesystem::path flash_root_{"flash0"};
+    std::uint32_t language_{1u}; // English
     std::string cwd_{"disc0:/"};
     std::set<std::string> registered_;
     std::set<std::string> fallback_logged_;

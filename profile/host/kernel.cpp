@@ -157,7 +157,13 @@ std::uint64_t Kernel::now_us() const {
     // of time.  The game then sees every timer and every movement integration
     // run fast, and by an amount that varies per frame, so the clock jumps.
     if (elapsed_us > kFrameUs) elapsed_us = kFrameUs;
-    return frame_start_guest_us_ + elapsed_us + warp_us_;
+    // An idle warp (every thread waiting on a timer) jumps *to* a point inside
+    // the frame; it is a floor on the offset, not an amount added to real time.
+    // Adding the two counted the same stretch twice: real time kept running
+    // while the host idled until the next frame, so the following frame started
+    // a whole warp late, and games that integrate by elapsed system time (The
+    // Warriors) ran at up to twice their speed.
+    return frame_start_guest_us_ + std::max(elapsed_us, warp_us_);
 }
 
 void Kernel::finish(Ctx &ctx, std::uint32_t result) {
@@ -766,7 +772,7 @@ bool Kernel::frame(double budget_ms) {
                     const std::uint64_t frame_end_us =
                         std::max(frame_start_guest_us_, static_cast<std::uint64_t>(display_.vcount) * kFrameUs) + kFrameUs - 1u;
                     if (wake_at != 0u && wake_at < frame_end_us) {
-                        if (wake_at > now) warp_us_ += wake_at - now;
+                        if (wake_at > now) warp_us_ = wake_at - frame_start_guest_us_;
                         continue;
                     }
                     break;
@@ -1785,7 +1791,7 @@ bool Kernel::run_exit_callback() {
                 load_thread(*next);
             } else {
                 const std::uint64_t wake_at = earliest_timed_wake();
-                if (wake_at != 0u && wake_at > now_us()) warp_us_ += wake_at - now_us();
+                if (wake_at != 0u && wake_at > now_us()) frame_start_guest_us_ += wake_at - now_us();
             }
             rt_.run(rt_.cpu().pc, std::numeric_limits<std::uint64_t>::max());
             const std::string &r = rt_.stop_reason();

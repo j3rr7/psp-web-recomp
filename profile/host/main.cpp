@@ -102,6 +102,28 @@ bool start_session(const std::string &module_path, const std::string &disc_root,
     s.kernel->reserve(load_base, image_end - load_base, "module:" + module->name);
     s.kernel->set_roots(disc_root, memstick_root);
     s.kernel->set_flash_root(std::filesystem::path(module_path).parent_path() / "flash0");
+    // System language: PSPWEB_LANGUAGE (the page sets it from ?lang=) wins,
+    // else a one-line "language" file next to EBOOT.BIN (a per-game default for
+    // discs that only ship some languages), else English.
+    {
+        std::string wanted, source;
+        if (const char *env = std::getenv("PSPWEB_LANGUAGE"); env != nullptr && *env != '\0') {
+            wanted = env;
+            source = "PSPWEB_LANGUAGE";
+        } else {
+            const auto file = std::filesystem::path(module_path).parent_path() / "language";
+            if (std::ifstream in(file); in && std::getline(in, wanted)) source = file.string();
+        }
+        if (!source.empty()) {
+            std::uint32_t language = 1u;
+            if (pspweb::Kernel::parse_language(wanted, language)) {
+                s.kernel->set_language(language);
+                std::cout << "[pspweb] system language " << language << " (" << wanted << ", from " << source << ")\n";
+            } else {
+                std::cerr << "[pspweb] unknown language '" << wanted << "' in " << source << ", using English\n";
+            }
+        }
+    }
     if (!manifest.empty() && !s.kernel->enable_webfs(manifest, data_url))
         std::cerr << "[pspweb] no disc manifest at " << manifest << ", using local files\n";
     s.kernel->add_main_module(*module, load_base, image_end - load_base);
@@ -766,14 +788,6 @@ int main(int argc, char **argv) {
             }
             const auto &ge = g_session.kernel->ge().stats();
             if (frame % 60 == 0) {
-                std::cout << "[clock " << frame << "] guest_us=" << g_session.kernel->now_us()
-                          << " nominal_us=" << static_cast<std::uint64_t>(g_session.kernel->display().vcount) * 16683u
-                          << " warp_us=" << g_session.kernel->warp_us_for_diag()
-                          << " ratio=" << (g_session.kernel->display().vcount != 0u
-                                 ? static_cast<double>(g_session.kernel->now_us()) /
-                                       (static_cast<double>(g_session.kernel->display().vcount) * 16683.0)
-                                 : 0.0)
-                          << "\n";
                 std::cout << "[frame " << frame << "] fb=0x" << std::hex << g_session.kernel->display().framebuffer
                           << std::dec << " ge lists=" << ge.lists << " prims=" << ge.prims << " tris=" << ge.triangles
                           << " culled=" << ge.culled

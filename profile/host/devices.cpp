@@ -4,6 +4,7 @@
 
 #include "kernel.hpp"
 
+#include <cctype>
 #include <cstring>
 
 #include <algorithm>
@@ -368,11 +369,37 @@ void Kernel::sceUmdWaitDriveStatCB(Ctx &ctx) {
     finish(ctx, 0u);
 }
 
+bool Kernel::parse_language(const std::string &text, std::uint32_t &language) {
+    std::string key;
+    for (const char c : text) {
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') continue;
+        key += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    if (key.empty()) return false;
+    if (std::all_of(key.begin(), key.end(), [](char c) { return c >= '0' && c <= '9'; })) {
+        if (key.size() > 2u) return false;
+        language = static_cast<std::uint32_t>(std::stoul(key));
+        return language <= 11u;
+    }
+    static constexpr const char *kCodes[12][2] = {
+        {"ja", "japanese"}, {"en", "english"}, {"fr", "french"}, {"es", "spanish"},
+        {"de", "german"}, {"it", "italian"}, {"nl", "dutch"}, {"pt", "portuguese"},
+        {"ru", "russian"}, {"ko", "korean"}, {"zh-tw", "chinese-traditional"}, {"zh", "chinese"},
+    };
+    for (std::uint32_t i = 0; i < 12u; ++i) {
+        if (key == kCodes[i][0] || key == kCodes[i][1]) {
+            language = i;
+            return true;
+        }
+    }
+    return false;
+}
+
 void Kernel::sceUtilityGetSystemParamInt(Ctx &ctx) {
     std::uint32_t value = 0u;
     switch (ctx.gpr[4]) {
     case 2: case 3: case 4: case 5: case 6: case 7: break; // ad hoc channel, power save, date/time format, zone, DST
-    case 8: value = 1u; break;  // language: English
+    case 8: value = language_; break;  // language (see set_language)
     case 9: value = 1u; break;  // cross confirms
     default:
         finish(ctx, kErrorInvalidSystemParam);
@@ -399,7 +426,7 @@ void Kernel::sceCtrlReadLatch(Ctx &ctx) {
 }
 
 void Kernel::sceImposeGetLanguageMode(Ctx &ctx) {
-    if (ctx.gpr[4] != 0u) rt_.memory().store32(ctx.gpr[4], 1u); // English
+    if (ctx.gpr[4] != 0u) rt_.memory().store32(ctx.gpr[4], language_);
     if (ctx.gpr[5] != 0u) rt_.memory().store32(ctx.gpr[5], 1u); // Cross confirms
     finish(ctx, 0u);
 }
