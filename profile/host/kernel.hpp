@@ -259,6 +259,9 @@ public:
     [[nodiscard]] bool halted() const noexcept { return halted_; }
     [[nodiscard]] const std::string &halt_reason() const noexcept { return halt_reason_; }
     [[nodiscard]] std::uint64_t now_us() const;
+    // Diagnostic only (native:report_clock): the idle-warp accumulator, so the
+    // drift between the guest clock and the nominal frame timeline is visible.
+    [[nodiscard]] std::uint64_t warp_us_for_diag() const noexcept { return warp_us_; }
     [[nodiscard]] Ge &ge() noexcept { return *ge_; }
     // Runs display lists (on a GE thread once started) and other GE-side work.
     [[nodiscard]] GeWorker &ge_worker() noexcept { return *ge_worker_; }

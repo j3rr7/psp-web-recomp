@@ -766,6 +766,14 @@ int main(int argc, char **argv) {
             }
             const auto &ge = g_session.kernel->ge().stats();
             if (frame % 60 == 0) {
+                std::cout << "[clock " << frame << "] guest_us=" << g_session.kernel->now_us()
+                          << " nominal_us=" << static_cast<std::uint64_t>(g_session.kernel->display().vcount) * 16683u
+                          << " warp_us=" << g_session.kernel->warp_us_for_diag()
+                          << " ratio=" << (g_session.kernel->display().vcount != 0u
+                                 ? static_cast<double>(g_session.kernel->now_us()) /
+                                       (static_cast<double>(g_session.kernel->display().vcount) * 16683.0)
+                                 : 0.0)
+                          << "\n";
                 std::cout << "[frame " << frame << "] fb=0x" << std::hex << g_session.kernel->display().framebuffer
                           << std::dec << " ge lists=" << ge.lists << " prims=" << ge.prims << " tris=" << ge.triangles
                           << " culled=" << ge.culled

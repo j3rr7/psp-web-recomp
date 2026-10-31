@@ -147,7 +147,16 @@ void Kernel::set_roots(std::filesystem::path disc_root, std::filesystem::path me
 
 std::uint64_t Kernel::now_us() const {
     const std::int64_t elapsed_ns = real_now_ns() - frame_real_start_ns_;
-    const std::uint64_t elapsed_us = elapsed_ns > 0 ? static_cast<std::uint64_t>(elapsed_ns / 1000) : 0u;
+    std::uint64_t elapsed_us = elapsed_ns > 0 ? static_cast<std::uint64_t>(elapsed_ns / 1000) : 0u;
+    // A frame is one vblank long however long the host took to run it.  The
+    // frame start is the anchor; real time only fills in *how far into* that
+    // frame we are, so it must not carry us past the frame's end.  Without this
+    // clamp a frame that overruns its budget -- the idle warp loop below still
+    // running when the deadline hits, a slow machine, a backgrounded tab --
+    // hands the guest frame_start + real_elapsed, which is more than one frame
+    // of time.  The game then sees every timer and every movement integration
+    // run fast, and by an amount that varies per frame, so the clock jumps.
+    if (elapsed_us > kFrameUs) elapsed_us = kFrameUs;
     return frame_start_guest_us_ + elapsed_us + warp_us_;
 }
 
